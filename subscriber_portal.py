@@ -532,7 +532,7 @@ def app_payment_screen(db_path, sub):
 
     fee = float(get_setting(db_path, 'app_fee', '10'))
     instapay = get_setting(db_path, 'instapay_number', '')
-    vodafone = get_setting(db_path, 'vodafinstapay_numberone_cash_number', '')
+    vodafone = get_setting(db_path, 'instapay_number', '')
 
     st.markdown(f"""
     <div class="pay-box">
