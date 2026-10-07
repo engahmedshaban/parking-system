@@ -5,3 +5,4 @@ qrcode[pil]==8.0
 pillow==10.4.0
 python-barcode==0.15.1
 python-dotenv==1.0.1
+extra-streamlit-components==0.1.71
