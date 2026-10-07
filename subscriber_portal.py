@@ -107,7 +107,9 @@ def _init_app_tables(db_path):
 # ============================================================
 def get_all_garages_from_registry():
     try:
-        registry_path = 'garages_registry.db'
+        # ⭐ Railway Volume Support
+        registry_path = '/data/garages_registry.db' if os.path.exists('/data') else 'garages_registry.db'
+
         if not os.path.exists(registry_path):
             return []
         return _query_all(
@@ -116,8 +118,6 @@ def get_all_garages_from_registry():
         )
     except Exception:
         return []
-
-
 # ============================================================
 #  QR & Barcode
 # ============================================================
