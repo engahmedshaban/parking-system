@@ -13,7 +13,7 @@ if __name__ == "__main__":
     port = os.environ.get("PORT", "8501")
 
     # ⭐ مسار مطلق
-    APP_PATH = "/app/lastv.py"
+    APP_PATH = "/app/Lastv.py"
     if not os.path.exists(APP_PATH):
         # fallback لو الملف في مسار مختلف
         APP_PATH = os.path.join(os.path.dirname(__file__), "lastv.py")
