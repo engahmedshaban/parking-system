@@ -373,33 +373,38 @@ def login_screen():
                 if not sub:
                     st.error("❌ رقم التلفون غير مسجل في هذا الجراج")
                 else:
-                    # ⭐ حفظ البيانات في session_state
+                    # ⭐ حفظ في session_state
                     st.session_state['sub_portal_logged_in'] = True
                     st.session_state['sub_portal_phone'] = phone.strip()
                     st.session_state['sub_portal_sub_id'] = sub['id']
 
-                    # ⭐ حفظ في Cookie باستخدام cookie_manager موجود
+                    # ⭐ حفظ في Cookie — على HTTPS محتاج secure=True
                     try:
                         cm = stx.CookieManager(key="sub_cookie_mgr_set")
+                        gid = str(st.session_state.get('sub_portal_garage_id', ''))
                         cm.set(
                             "sub_portal_phone",
                             phone.strip(),
-                            max_age=60 * 60 * 24 * 30,
+                            expires_at=datetime.now() + timedelta(days=30),
+                            path="/",
+                            secure=True,
+                            same_site="Lax",
                             key="set_phone_cookie"
                         )
                         cm.set(
                             "sub_portal_garage_id",
-                            str(st.session_state.get('sub_portal_garage_id', '')),
-                            max_age=60 * 60 * 24 * 30,
+                            gid,
+                            expires_at=datetime.now() + timedelta(days=30),
+                            path="/",
+                            secure=True,
+                            same_site="Lax",
                             key="set_garage_cookie"
                         )
                     except Exception as e:
                         print(f"Cookie set error: {e}")
 
-                    # ⭐ انتظر لحظة قبل rerun للتأكد إن الـ Cookie اتحفظ
                     time.sleep(0.5)
                     st.rerun()
-
 def expired_screen(sub):
     st.markdown("""
     <div class="portal-header">
@@ -713,29 +718,20 @@ def show_app_payments(db):
 
 # ============================================================
 #  نقطة الدخول
-# ============================================================
 def subscriber_portal_page(db=None):
     """db parameter موجود للتوافق فقط — لا يُستخدم"""
     inject_mobile_css()
 
-    # ⭐ Cookie Manager (مفتاح ثابت)
-    cookie_manager = stx.CookieManager(key="sub_cookie_mgr")
-
-    # ⭐ flag لتجنب إعادة المحاولة في كل rerun
-    if 'cookie_checked' not in st.session_state:
-        st.session_state['cookie_checked'] = False
+    # ⭐⭐⭐ قراءة مباشرة من الـ request (موثوق 100%) ⭐⭐⭐
+    try:
+        request_cookies = st.context.cookies
+    except Exception:
+        request_cookies = {}
 
     # ⭐ لو مفيش جلسة حالية → حاول استرجعها من Cookie
-    if not st.session_state.get('sub_portal_logged_in') and not st.session_state['cookie_checked']:
-        st.session_state['cookie_checked'] = True
-
-        try:
-            all_cookies = cookie_manager.get_all()
-        except Exception:
-            all_cookies = {}
-
-        saved_phone = all_cookies.get("sub_portal_phone") if all_cookies else None
-        saved_garage_id = all_cookies.get("sub_portal_garage_id") if all_cookies else None
+    if not st.session_state.get('sub_portal_logged_in'):
+        saved_phone = request_cookies.get("sub_portal_phone") if request_cookies else None
+        saved_garage_id = request_cookies.get("sub_portal_garage_id") if request_cookies else None
 
         if saved_phone and saved_garage_id:
             try:
@@ -775,12 +771,11 @@ def subscriber_portal_page(db=None):
                             else:
                                 # ❌ الاشتراك انتهى → امسح الـ Cookie
                                 try:
-                                    cookie_manager.delete("sub_portal_phone")
-                                    cookie_manager.delete("sub_portal_garage_id")
+                                    cm = stx.CookieManager(key="sub_cookie_mgr_clear")
+                                    cm.delete("sub_portal_phone")
+                                    cm.delete("sub_portal_garage_id")
                                 except Exception:
                                     pass
-                                # اسمح بمحاولة تانية في المرة القادمة
-                                st.session_state['cookie_checked'] = False
             except Exception:
                 pass
 
@@ -804,7 +799,6 @@ def subscriber_portal_page(db=None):
             for k in list(st.session_state.keys()):
                 if k.startswith('sub_portal_'):
                     st.session_state.pop(k, None)
-            st.session_state['cookie_checked'] = False
             st.rerun()
         return
 
@@ -819,7 +813,6 @@ def subscriber_portal_page(db=None):
             for k in list(st.session_state.keys()):
                 if k.startswith('sub_portal_'):
                     st.session_state.pop(k, None)
-            st.session_state['cookie_checked'] = False
             st.rerun()
         return
 
@@ -832,14 +825,12 @@ def subscriber_portal_page(db=None):
         end_dt = None
 
     if end_dt and end_dt < datetime.now():
-        # ⭐ امسح الـ Cookies — لأن الاشتراك انتهى
         try:
             cm = stx.CookieManager(key="sub_cookie_mgr_expired")
             cm.delete("sub_portal_phone")
             cm.delete("sub_portal_garage_id")
         except Exception:
             pass
-
         expired_screen(sub)
         footer()
         return
@@ -870,3 +861,4 @@ def subscriber_portal_page(db=None):
     # 7) الشاشة الرئيسية
     main_screen(db_path, sub)
     footer()
+
