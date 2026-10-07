@@ -3,10 +3,9 @@ nixPkgs = ["python311", "gcc"]
 
 [phases.install]
 cmds = [
-    "python3.11 -m venv /app/venv",
-    "source /app/venv/bin/activate && pip install --upgrade pip",
-    "source /app/venv/bin/activate && pip install -r requirements.txt"
+    "python3.11 -m pip install --upgrade pip",
+    "python3.11 -m pip install -r requirements.txt"
 ]
 
 [start]
-cmd = "source /app/venv/bin/activate && streamlit run lastv.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false"
+cmd = "cd /app && streamlit run /app/lastv.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false"
