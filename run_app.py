@@ -15,7 +15,7 @@ if __name__ == "__main__":
     sys.argv = [
         "streamlit",
         "run",
-        "lastv.py",
+        "Lastv.py",
         f"--server.port={port}",
         "--server.address=0.0.0.0",
         "--server.headless=true"

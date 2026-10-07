@@ -7,6 +7,5 @@ cmds = [
     "python3.11 -m pip install --upgrade pip",
     "python3.11 -m pip install -r requirements.txt"
 ]
-
 [start]
-cmd = "cd /app && ls -la /app && streamlit run /app/lastv.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false"
+cmd = "cd /app && streamlit run /app/Lastv.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false"
