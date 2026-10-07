@@ -725,25 +725,19 @@ def subscriber_portal_page(db=None):
     if 'cookie_checked' not in st.session_state:
         st.session_state['cookie_checked'] = False
 
-    # ⭐ لو مفيش جلسة حالية → حاول استرجعها من Cookie (مرة واحدة بس)
+    # ⭐ لو مفيش جلسة حالية → حاول استرجعها من Cookie
     if not st.session_state.get('sub_portal_logged_in') and not st.session_state['cookie_checked']:
         st.session_state['cookie_checked'] = True
 
-        # ⭐ انتظر لحظة عشان CookieManager يقرأ الـ Cookies
-        # (أول render بياخد وقت، وبيرجع None)
         try:
             all_cookies = cookie_manager.get_all()
         except Exception:
             all_cookies = {}
 
-        saved_phone = all_cookies.get("sub_portal_phone")
-        saved_garage_id = all_cookies.get("sub_portal_garage_id")
+        saved_phone = all_cookies.get("sub_portal_phone") if all_cookies else None
+        saved_garage_id = all_cookies.get("sub_portal_garage_id") if all_cookies else None
 
-        # لو مفيش cookies، اعمل rerun واحد بس للسماح بالقراءة
-        if not saved_phone and not saved_garage_id:
-            st.session_state['cookie_checked'] = False  # اسمح بمحاولة تانية
-            # ما نعملش rerun هنا لتجنب loop لا نهائي
-        else:
+        if saved_phone and saved_garage_id:
             try:
                 garages = get_all_garages_from_registry()
                 target_garage = next(
@@ -785,6 +779,8 @@ def subscriber_portal_page(db=None):
                                     cookie_manager.delete("sub_portal_garage_id")
                                 except Exception:
                                     pass
+                                # اسمح بمحاولة تانية في المرة القادمة
+                                st.session_state['cookie_checked'] = False
             except Exception:
                 pass
 
@@ -793,3 +789,84 @@ def subscriber_portal_page(db=None):
         garage_selection_screen()
         footer()
         return
+
+    # 2) تسجيل الدخول
+    if not st.session_state.get('sub_portal_logged_in'):
+        login_screen()
+        footer()
+        return
+
+    # 3) فتح قاعدة بيانات الجراج
+    db_path = st.session_state.get('sub_portal_garage_db_path')
+    if not db_path or not os.path.exists(db_path):
+        st.error("❌ قاعدة بيانات الجراج غير موجودة")
+        if st.button("🔄 من جديد", key="restart_portal"):
+            for k in list(st.session_state.keys()):
+                if k.startswith('sub_portal_'):
+                    st.session_state.pop(k, None)
+            st.session_state['cookie_checked'] = False
+            st.rerun()
+        return
+
+    _init_app_tables(db_path)
+
+    # 4) جلب المشترك
+    phone = st.session_state.get('sub_portal_phone')
+    sub = get_subscriber_by_phone(db_path, phone)
+    if not sub:
+        st.error("❌ المشترك غير موجود")
+        if st.button("🔄 من جديد", key="restart_portal2"):
+            for k in list(st.session_state.keys()):
+                if k.startswith('sub_portal_'):
+                    st.session_state.pop(k, None)
+            st.session_state['cookie_checked'] = False
+            st.rerun()
+        return
+
+    # 5) فحص اشتراك الجراج
+    try:
+        end_dt = datetime.fromisoformat(
+            str(sub['subscription_end']).replace('Z', '').split('.')[0]
+        ) if sub.get('subscription_end') else None
+    except Exception:
+        end_dt = None
+
+    if end_dt and end_dt < datetime.now():
+        # ⭐ امسح الـ Cookies — لأن الاشتراك انتهى
+        try:
+            cm = stx.CookieManager(key="sub_cookie_mgr_expired")
+            cm.delete("sub_portal_phone")
+            cm.delete("sub_portal_garage_id")
+        except Exception:
+            pass
+
+        expired_screen(sub)
+        footer()
+        return
+
+    # 6) فحص اشتراك التطبيق
+    app_active = sub.get('app_subscription_active')
+    app_end = sub.get('app_subscription_end')
+    app_expired = False
+
+    if not app_active:
+        app_expired = True
+    else:
+        try:
+            if app_end:
+                aed = datetime.fromisoformat(
+                    str(app_end).replace('Z', '').split('.')[0]
+                )
+                if aed < datetime.now():
+                    app_expired = True
+        except Exception:
+            pass
+
+    if app_expired:
+        app_payment_screen(db_path, sub)
+        footer()
+        return
+
+    # 7) الشاشة الرئيسية
+    main_screen(db_path, sub)
+    footer()
