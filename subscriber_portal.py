@@ -20,7 +20,80 @@ except ImportError:
 DEVELOPER_NAME = "مهندس أحمد شعبان"
 DEVELOPER_PHONE = "01095387792"
 
+import secrets
 
+def _generate_session_token():
+    """يولّد token فريد"""
+    return secrets.token_urlsafe(32)
+
+
+def _save_session_token(db_path, subscriber_id, garage_id):
+    """يحفظ token في قاعدة البيانات"""
+    try:
+        token = _generate_session_token()
+        expires = (datetime.now() + timedelta(days=30)).isoformat()
+        with sqlite3.connect(db_path, timeout=30) as conn:
+            conn.execute('''CREATE TABLE IF NOT EXISTS subscriber_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subscriber_id TEXT NOT NULL,
+                garage_id INTEGER NOT NULL,
+                session_token TEXT UNIQUE NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                expires_at TEXT NOT NULL,
+                is_active INTEGER DEFAULT 1
+            )''')
+            conn.execute(
+                "INSERT INTO subscriber_sessions (subscriber_id, garage_id, session_token, expires_at) VALUES (?, ?, ?, ?)",
+                (subscriber_id, garage_id, token, expires)
+            )
+            conn.commit()
+        return token
+    except Exception as e:
+        print(f"Token save error: {e}")
+        return None
+
+
+def _validate_session_token(db_path, token):
+    """يتحقق من token ويرجع (subscriber_id, garage_id) لو صالح"""
+    if not token:
+        return None, None
+    try:
+        with sqlite3.connect(db_path, timeout=30) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute(
+                """SELECT subscriber_id, garage_id, expires_at 
+                   FROM subscriber_sessions 
+                   WHERE session_token=? AND is_active=1""",
+                (token,)
+            )
+            row = cur.fetchone()
+            if not row:
+                return None, None
+            # تحقق من انتهاء الصلاحية
+            try:
+                exp_dt = datetime.fromisoformat(row['expires_at'])
+                if exp_dt < datetime.now():
+                    return None, None
+            except Exception:
+                pass
+            return row['subscriber_id'], row['garage_id']
+    except Exception:
+        return None, None
+
+
+def _revoke_session_token(db_path, token):
+    """يلغي token (عند تسجيل الخروج)"""
+    if not token:
+        return
+    try:
+        with sqlite3.connect(db_path, timeout=30) as conn:
+            conn.execute(
+                "UPDATE subscriber_sessions SET is_active=0 WHERE session_token=?",
+                (token,)
+            )
+            conn.commit()
+    except Exception:
+        pass
 # ============================================================
 #  SQLite helpers مباشرة (بدون Database class)
 # ============================================================
@@ -340,6 +413,7 @@ def garage_selection_screen():
 
 def login_screen():
     garage_name = st.session_state.get('sub_portal_garage_name', '')
+    garage_id = st.session_state.get('sub_portal_garage_id', 1)
 
     st.markdown(f"""
     <div class="portal-header">
@@ -352,6 +426,7 @@ def login_screen():
     if st.button("← تغيير الجراج", key="change_garage"):
         for k in ['sub_portal_garage_id', 'sub_portal_garage_name', 'sub_portal_garage_db_path']:
             st.session_state.pop(k, None)
+        st.query_params.clear()
         st.rerun()
 
     with st.form("sub_login"):
@@ -373,38 +448,26 @@ def login_screen():
                 if not sub:
                     st.error("❌ رقم التلفون غير مسجل في هذا الجراج")
                 else:
+                    # ⭐ توليد token وحفظه في DB
+                    token = _save_session_token(db_path, sub['id'], garage_id)
+
+                    if not token:
+                        st.error("❌ فشل إنشاء جلسة")
+                        return
+
                     # ⭐ حفظ في session_state
                     st.session_state['sub_portal_logged_in'] = True
                     st.session_state['sub_portal_phone'] = phone.strip()
                     st.session_state['sub_portal_sub_id'] = sub['id']
+                    st.session_state['sub_portal_token'] = token
 
-                    # ⭐ حفظ في Cookie — على HTTPS محتاج secure=True
-                    try:
-                        cm = stx.CookieManager(key="sub_cookie_mgr_set")
-                        gid = str(st.session_state.get('sub_portal_garage_id', ''))
-                        cm.set(
-                            "sub_portal_phone",
-                            phone.strip(),
-                            expires_at=datetime.now() + timedelta(days=30),
-                            path="/",
-                            secure=True,
-                            same_site="Lax",
-                            key="set_phone_cookie"
-                        )
-                        cm.set(
-                            "sub_portal_garage_id",
-                            gid,
-                            expires_at=datetime.now() + timedelta(days=30),
-                            path="/",
-                            secure=True,
-                            same_site="Lax",
-                            key="set_garage_cookie"
-                        )
-                    except Exception as e:
-                        print(f"Cookie set error: {e}")
+                    # ⭐⭐⭐ حط الـ token في الرابط ⭐⭐⭐
+                    st.query_params["view"] = "subscriber"
+                    st.query_params["token"] = token
 
-                    time.sleep(0.5)
+                    time.sleep(0.3)
                     st.rerun()
+
 def expired_screen(sub):
     st.markdown("""
     <div class="portal-header">
@@ -432,17 +495,23 @@ def expired_screen(sub):
     """, unsafe_allow_html=True)
 
     if st.button("🚪 تسجيل الخروج", key="logout_main"):
-        # ⭐ امسح الـ Cookies
+        # ⭐ إلغاء الـ token
         try:
-            cookie_manager = stx.CookieManager(key="sub_cookie_mgr_logout")
-            cookie_manager.delete("sub_portal_phone")
-            cookie_manager.delete("sub_portal_garage_id")
+            db_path = st.session_state.get('sub_portal_garage_db_path')
+            token = st.session_state.get('sub_portal_token')
+            if db_path and token:
+                _revoke_session_token(db_path, token)
         except Exception:
             pass
 
-        for k in ['sub_portal_logged_in', 'sub_portal_phone', 'sub_portal_sub_id',
-                  'sub_portal_garage_id', 'sub_portal_garage_name', 'sub_portal_garage_db_path']:
-            st.session_state.pop(k, None)
+        # ⭐ مسح session_state
+        for k in list(st.session_state.keys()):
+            if k.startswith('sub_portal_'):
+                st.session_state.pop(k, None)
+
+        # ⭐⭐⭐ امسح الـ token من الرابط ⭐⭐⭐
+        st.query_params.clear()
+
         st.rerun()
 
 def app_payment_screen(db_path, sub):
@@ -517,19 +586,24 @@ def app_payment_screen(db_path, sub):
                     st.error("❌ فشل الإرسال")
 
     if st.button("🚪 تسجيل الخروج", key="logout_main"):
-        # ⭐ امسح الـ Cookies
+        # ⭐ إلغاء الـ token
         try:
-            cookie_manager = stx.CookieManager(key="sub_cookie_mgr_logout")
-            cookie_manager.delete("sub_portal_phone")
-            cookie_manager.delete("sub_portal_garage_id")
+            db_path = st.session_state.get('sub_portal_garage_db_path')
+            token = st.session_state.get('sub_portal_token')
+            if db_path and token:
+                _revoke_session_token(db_path, token)
         except Exception:
             pass
 
-        for k in ['sub_portal_logged_in', 'sub_portal_phone', 'sub_portal_sub_id',
-                  'sub_portal_garage_id', 'sub_portal_garage_name', 'sub_portal_garage_db_path']:
-            st.session_state.pop(k, None)
-        st.rerun()
+        # ⭐ مسح session_state
+        for k in list(st.session_state.keys()):
+            if k.startswith('sub_portal_'):
+                st.session_state.pop(k, None)
 
+        # ⭐⭐⭐ امسح الـ token من الرابط ⭐⭐⭐
+        st.query_params.clear()
+
+        st.rerun()
 
 def main_screen(db_path, sub):
     garage_name = st.session_state.get('sub_portal_garage_name', '')
@@ -602,19 +676,24 @@ def main_screen(db_path, sub):
             pass
 
     if st.button("🚪 تسجيل الخروج", key="logout_main"):
-        # ⭐ امسح الـ Cookies
+        # ⭐ إلغاء الـ token
         try:
-            cookie_manager = stx.CookieManager(key="sub_cookie_mgr_logout")
-            cookie_manager.delete("sub_portal_phone")
-            cookie_manager.delete("sub_portal_garage_id")
+            db_path = st.session_state.get('sub_portal_garage_db_path')
+            token = st.session_state.get('sub_portal_token')
+            if db_path and token:
+                _revoke_session_token(db_path, token)
         except Exception:
             pass
 
-        for k in ['sub_portal_logged_in', 'sub_portal_phone', 'sub_portal_sub_id',
-                  'sub_portal_garage_id', 'sub_portal_garage_name', 'sub_portal_garage_db_path']:
-            st.session_state.pop(k, None)
-        st.rerun()
+        # ⭐ مسح session_state
+        for k in list(st.session_state.keys()):
+            if k.startswith('sub_portal_'):
+                st.session_state.pop(k, None)
 
+        # ⭐⭐⭐ امسح الـ token من الرابط ⭐⭐⭐
+        st.query_params.clear()
+
+        st.rerun()
 
 # ============================================================
 #  📱 صفحة دفعات التطبيق للسوبر أدمن
@@ -722,62 +801,36 @@ def subscriber_portal_page(db=None):
     """db parameter موجود للتوافق فقط — لا يُستخدم"""
     inject_mobile_css()
 
-    # ⭐⭐⭐ قراءة مباشرة من الـ request (موثوق 100%) ⭐⭐⭐
-    try:
-        request_cookies = st.context.cookies
-    except Exception:
-        request_cookies = {}
+    # ⭐⭐⭐ قراءة الـ token من الرابط ⭐⭐⭐
+    token = st.query_params.get("token")
 
-    # ⭐ لو مفيش جلسة حالية → حاول استرجعها من Cookie
-    if not st.session_state.get('sub_portal_logged_in'):
-        saved_phone = request_cookies.get("sub_portal_phone") if request_cookies else None
-        saved_garage_id = request_cookies.get("sub_portal_garage_id") if request_cookies else None
+    # ⭐ محاولة استرجاع الجلسة من الـ token
+    if not st.session_state.get('sub_portal_logged_in') and token:
+        try:
+            garages = get_all_garages_from_registry()
+            # ابحث في كل الجراجات عن الـ token
+            for g in garages:
+                db_path = g['db_path']
+                if not os.path.exists(db_path):
+                    continue
+                _init_app_tables(db_path)
 
-        if saved_phone and saved_garage_id:
-            try:
-                garages = get_all_garages_from_registry()
-                target_garage = next(
-                    (g for g in garages if str(g['id']) == str(saved_garage_id)),
-                    None
-                )
-
-                if target_garage:
-                    db_path = target_garage['db_path']
-                    if os.path.exists(db_path):
-                        _init_app_tables(db_path)
-                        sub = get_subscriber_by_phone(db_path, saved_phone)
-
-                        if sub:
-                            is_valid = True
-                            if sub.get('subscription_end'):
-                                try:
-                                    end_dt = datetime.fromisoformat(
-                                        str(sub['subscription_end']).replace('Z', '').split('.')[0]
-                                    )
-                                    if end_dt < datetime.now():
-                                        is_valid = False
-                                except Exception:
-                                    pass
-
-                            if is_valid:
-                                # ✅ استرجع الجلسة
-                                st.session_state['sub_portal_logged_in'] = True
-                                st.session_state['sub_portal_phone'] = saved_phone
-                                st.session_state['sub_portal_sub_id'] = sub['id']
-                                st.session_state['sub_portal_garage_id'] = target_garage['id']
-                                st.session_state['sub_portal_garage_name'] = target_garage['name']
-                                st.session_state['sub_portal_garage_db_path'] = db_path
-                                st.rerun()
-                            else:
-                                # ❌ الاشتراك انتهى → امسح الـ Cookie
-                                try:
-                                    cm = stx.CookieManager(key="sub_cookie_mgr_clear")
-                                    cm.delete("sub_portal_phone")
-                                    cm.delete("sub_portal_garage_id")
-                                except Exception:
-                                    pass
-            except Exception:
-                pass
+                sub_id, gid = _validate_session_token(db_path, token)
+                if sub_id:
+                    # ✅ token صالح — استرجع الجلسة
+                    sub = _query_one(db_path, "SELECT * FROM subscribers WHERE id=?", (sub_id,))
+                    if sub:
+                        st.session_state['sub_portal_logged_in'] = True
+                        st.session_state['sub_portal_sub_id'] = sub_id
+                        st.session_state['sub_portal_phone'] = sub.get('phone', '')
+                        st.session_state['sub_portal_garage_id'] = g['id']
+                        st.session_state['sub_portal_garage_name'] = g['name']
+                        st.session_state['sub_portal_garage_db_path'] = db_path
+                        st.session_state['sub_portal_token'] = token
+                        st.rerun()
+                    break
+        except Exception as e:
+            print(f"Token restore error: {e}")
 
     # 1) اختيار الجراج
     if not st.session_state.get('sub_portal_garage_id'):
@@ -791,7 +844,7 @@ def subscriber_portal_page(db=None):
         footer()
         return
 
-    # 3) فتح قاعدة بيانات الجراج
+    # 3) فتح قاعدة البيانات
     db_path = st.session_state.get('sub_portal_garage_db_path')
     if not db_path or not os.path.exists(db_path):
         st.error("❌ قاعدة بيانات الجراج غير موجودة")
@@ -799,20 +852,22 @@ def subscriber_portal_page(db=None):
             for k in list(st.session_state.keys()):
                 if k.startswith('sub_portal_'):
                     st.session_state.pop(k, None)
+            st.query_params.clear()
             st.rerun()
         return
 
     _init_app_tables(db_path)
 
     # 4) جلب المشترك
-    phone = st.session_state.get('sub_portal_phone')
-    sub = get_subscriber_by_phone(db_path, phone)
+    sub_id = st.session_state.get('sub_portal_sub_id')
+    sub = _query_one(db_path, "SELECT * FROM subscribers WHERE id=?", (sub_id,))
     if not sub:
         st.error("❌ المشترك غير موجود")
         if st.button("🔄 من جديد", key="restart_portal2"):
             for k in list(st.session_state.keys()):
                 if k.startswith('sub_portal_'):
                     st.session_state.pop(k, None)
+            st.query_params.clear()
             st.rerun()
         return
 
@@ -825,12 +880,12 @@ def subscriber_portal_page(db=None):
         end_dt = None
 
     if end_dt and end_dt < datetime.now():
+        # ⭐ إلغاء الـ token
         try:
-            cm = stx.CookieManager(key="sub_cookie_mgr_expired")
-            cm.delete("sub_portal_phone")
-            cm.delete("sub_portal_garage_id")
+            _revoke_session_token(db_path, st.session_state.get('sub_portal_token', ''))
         except Exception:
             pass
+        st.query_params.clear()
         expired_screen(sub)
         footer()
         return
@@ -861,4 +916,5 @@ def subscriber_portal_page(db=None):
     # 7) الشاشة الرئيسية
     main_screen(db_path, sub)
     footer()
+
 
