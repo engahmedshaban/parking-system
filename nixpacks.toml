@@ -8,4 +8,4 @@ cmds = [
 ]
 
 [start]
-cmd = "cd /app && streamlit run /app/lastv.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false"
+cmd = "echo '=== محتوى /app ===' && ls -la /app && echo '=== محتوى cwd ===' && ls -la && echo '=== ملفات py ===' && find / -name 'lastv.py' 2>/dev/null && sleep 5 && streamlit run /app/lastv.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false"
