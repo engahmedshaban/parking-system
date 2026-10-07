@@ -428,7 +428,7 @@ def app_payment_screen(db_path, sub):
 
     fee = float(get_setting(db_path, 'app_fee', '10'))
     instapay = get_setting(db_path, 'instapay_number', '')
-    vodafone = get_setting(db_path, 'vodafone_cash_number', '')
+    vodafone = get_setting(db_path, 'vodafinstapay_numberone_cash_number', '')
 
     st.markdown(f"""
     <div class="pay-box">
@@ -452,15 +452,15 @@ def app_payment_screen(db_path, sub):
     if vodafone:
         st.markdown(f"""
         <div class="pay-method">
-            <div class="label">📱 Vodafone Cash</div>
-            <div class="value">{vodafone}</div>
+            <div class="label">💳 instapay</div>
+            <div class="value">{instapay}</div>
         </div>
         """, unsafe_allow_html=True)
 
     with st.form("app_pay_form"):
         st.markdown("### 📝 بيانات التحويل")
         method = st.selectbox("🔄 طريقة الدفع",
-                              ["InstaPay", "Vodafone Cash", "أخرى"])
+                              ["InstaPay"])
         ref = st.text_input("🔢 رقم المرجع / آخر 4 أرقام")
         notes = st.text_area("📝 ملاحظات (اختياري)", height=70)
 
