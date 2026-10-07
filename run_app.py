@@ -1,9 +1,7 @@
-# run_app.py — نقطة تشغيل مخصصة
 import sys
 import asyncio
 import os
 
-# ⭐ IMPORTANT: قبل أي استيراد لـ streamlit
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -12,21 +10,25 @@ import streamlit.web.cli as stcli
 if __name__ == "__main__":
     port = os.environ.get("PORT", "8501")
 
-    # ⭐ مسار مطلق
-    APP_PATH = "/app/Lastv.py"
-    if not os.path.exists(APP_PATH):
-        # fallback لو الملف في مسار مختلف
-        APP_PATH = os.path.join(os.path.dirname(__file__), "lastv.py")
+    # ⭐ يدور على الحالتين
+    APP_PATH = None
+    for cand in ["/app/lastv.py", "/app/Lastv.py"]:
+        if os.path.exists(cand):
+            APP_PATH = cand
+            break
+
+    if not APP_PATH:
+        print("❌ lastv.py مش موجود في /app!")
+        sys.exit(1)
+
+    print(f"✅ Starting: {APP_PATH}")
 
     sys.argv = [
-        "streamlit",
-        "run",
-        APP_PATH,
+        "streamlit", "run", APP_PATH,
         f"--server.port={port}",
         "--server.address=0.0.0.0",
         "--server.headless=true",
         "--server.enableCORS=false",
         "--server.enableXsrfProtection=false"
     ]
-
     sys.exit(stcli.main())
