@@ -349,23 +349,15 @@ def login_screen():
     </div>
     """, unsafe_allow_html=True)
 
-    if st.button("🚪 تسجيل الخروج", key="logout_main"):
-        # ⭐ امسح الـ Cookies
-        try:
-            cookie_manager = stx.CookieManager(key="sub_cookie_mgr_logout")
-            cookie_manager.delete("sub_portal_phone")
-            cookie_manager.delete("sub_portal_garage_id")
-        except Exception:
-            pass
-
-        for k in ['sub_portal_logged_in', 'sub_portal_phone', 'sub_portal_sub_id',
-                  'sub_portal_garage_id', 'sub_portal_garage_name', 'sub_portal_garage_db_path']:
+    if st.button("← تغيير الجراج", key="change_garage"):
+        for k in ['sub_portal_garage_id', 'sub_portal_garage_name', 'sub_portal_garage_db_path']:
             st.session_state.pop(k, None)
         st.rerun()
 
     with st.form("sub_login"):
         phone = st.text_input("📱 رقم التلفون", placeholder="01xxxxxxxxx")
         submit = st.form_submit_button("🚀 دخول", use_container_width=True)
+
         if submit:
             if not phone.strip():
                 st.warning("⚠️ أدخل رقم التلفون")
@@ -377,34 +369,36 @@ def login_screen():
 
                 _init_app_tables(db_path)
                 sub = get_subscriber_by_phone(db_path, phone.strip())
+
                 if not sub:
                     st.error("❌ رقم التلفون غير مسجل في هذا الجراج")
                 else:
+                    # ⭐ حفظ البيانات في session_state
                     st.session_state['sub_portal_logged_in'] = True
                     st.session_state['sub_portal_phone'] = phone.strip()
                     st.session_state['sub_portal_sub_id'] = sub['id']
 
-                    # ⭐ احفظ في Cookie لمدة 30 يوم
+                    # ⭐ حفظ في Cookie باستخدام cookie_manager موجود
                     try:
-                        cookie_manager = stx.CookieManager(key="sub_cookie_mgr_login")
-                        cookie_manager.set(
+                        cm = stx.CookieManager(key="sub_cookie_mgr_set")
+                        cm.set(
                             "sub_portal_phone",
                             phone.strip(),
                             max_age=60 * 60 * 24 * 30,
                             key="set_phone_cookie"
                         )
-                        cookie_manager.set(
+                        cm.set(
                             "sub_portal_garage_id",
                             str(st.session_state.get('sub_portal_garage_id', '')),
                             max_age=60 * 60 * 24 * 30,
                             key="set_garage_cookie"
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"Cookie set error: {e}")
 
-                    time.sleep(0.3)
+                    # ⭐ انتظر لحظة قبل rerun للتأكد إن الـ Cookie اتحفظ
+                    time.sleep(0.5)
                     st.rerun()
-
 
 def expired_screen(sub):
     st.markdown("""
@@ -724,19 +718,38 @@ def subscriber_portal_page(db=None):
     """db parameter موجود للتوافق فقط — لا يُستخدم"""
     inject_mobile_css()
 
-    # ⭐ Cookie Manager
+    # ⭐ Cookie Manager (مفتاح ثابت)
     cookie_manager = stx.CookieManager(key="sub_cookie_mgr")
 
-    # ⭐ لو مفيش جلسة حالية → حاول استرجعها من Cookie
-    if not st.session_state.get('sub_portal_logged_in'):
-        try:
-            saved_phone = cookie_manager.get("sub_portal_phone")
-            saved_garage_id = cookie_manager.get("sub_portal_garage_id")
+    # ⭐ flag لتجنب إعادة المحاولة في كل rerun
+    if 'cookie_checked' not in st.session_state:
+        st.session_state['cookie_checked'] = False
 
-            if saved_phone and saved_garage_id:
-                # ابحث عن الجراج
+    # ⭐ لو مفيش جلسة حالية → حاول استرجعها من Cookie (مرة واحدة بس)
+    if not st.session_state.get('sub_portal_logged_in') and not st.session_state['cookie_checked']:
+        st.session_state['cookie_checked'] = True
+
+        # ⭐ انتظر لحظة عشان CookieManager يقرأ الـ Cookies
+        # (أول render بياخد وقت، وبيرجع None)
+        try:
+            all_cookies = cookie_manager.get_all()
+        except Exception:
+            all_cookies = {}
+
+        saved_phone = all_cookies.get("sub_portal_phone")
+        saved_garage_id = all_cookies.get("sub_portal_garage_id")
+
+        # لو مفيش cookies، اعمل rerun واحد بس للسماح بالقراءة
+        if not saved_phone and not saved_garage_id:
+            st.session_state['cookie_checked'] = False  # اسمح بمحاولة تانية
+            # ما نعملش rerun هنا لتجنب loop لا نهائي
+        else:
+            try:
                 garages = get_all_garages_from_registry()
-                target_garage = next((g for g in garages if str(g['id']) == str(saved_garage_id)), None)
+                target_garage = next(
+                    (g for g in garages if str(g['id']) == str(saved_garage_id)),
+                    None
+                )
 
                 if target_garage:
                     db_path = target_garage['db_path']
@@ -745,7 +758,6 @@ def subscriber_portal_page(db=None):
                         sub = get_subscriber_by_phone(db_path, saved_phone)
 
                         if sub:
-                            # ⭐ تحقق إن اشتراك الجراج لسه نشط
                             is_valid = True
                             if sub.get('subscription_end'):
                                 try:
@@ -768,10 +780,13 @@ def subscriber_portal_page(db=None):
                                 st.rerun()
                             else:
                                 # ❌ الاشتراك انتهى → امسح الـ Cookie
-                                cookie_manager.delete("sub_portal_phone")
-                                cookie_manager.delete("sub_portal_garage_id")
-        except Exception:
-            pass
+                                try:
+                                    cookie_manager.delete("sub_portal_phone")
+                                    cookie_manager.delete("sub_portal_garage_id")
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
 
     # 1) اختيار الجراج
     if not st.session_state.get('sub_portal_garage_id'):
