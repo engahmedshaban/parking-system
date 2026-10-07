@@ -2,6 +2,7 @@
 import sys
 import asyncio
 import os
+
 # ⭐ IMPORTANT: قبل أي استيراد لـ streamlit
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -15,10 +16,12 @@ if __name__ == "__main__":
     sys.argv = [
         "streamlit",
         "run",
-        "Lastv.py",
+        "lastv.py",          # ⭐ lowercase بدل Lastv.py
         f"--server.port={port}",
         "--server.address=0.0.0.0",
-        "--server.headless=true"
+        "--server.headless=true",
+        "--server.enableCORS=false",
+        "--server.enableXsrfProtection=false"
     ]
 
     sys.exit(stcli.main())

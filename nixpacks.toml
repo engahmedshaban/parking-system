@@ -3,10 +3,9 @@ nixPkgs = ["python311Full", "gcc"]
 
 [phases.install]
 cmds = [
-    "python3.11 -m ensurepip --upgrade",
-    "python3.11 -m pip install --upgrade pip",
-    "python3.11 -m pip install -r requirements.txt"
+    "python3.11 -m venv /app/venv",
+    "/app/venv/bin/pip install --upgrade pip",
+    "/app/venv/bin/pip install -r requirements.txt"
 ]
 
-[start]
-cmd = "cd /app && streamlit run /app/lastv.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false"
+# ⭐ امسح start من هنا — هنحدده من Railway UI
