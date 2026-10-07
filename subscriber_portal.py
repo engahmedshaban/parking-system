@@ -26,32 +26,51 @@ def _generate_session_token():
     """يولّد token فريد"""
     return secrets.token_urlsafe(32)
 
-
 def _save_session_token(db_path, subscriber_id, garage_id):
     """يحفظ token في قاعدة البيانات"""
     try:
         token = _generate_session_token()
         expires = (datetime.now() + timedelta(days=30)).isoformat()
+
         with sqlite3.connect(db_path, timeout=30) as conn:
+            # ⭐ تأكد من وجود الجدول
             conn.execute('''CREATE TABLE IF NOT EXISTS subscriber_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 subscriber_id TEXT NOT NULL,
                 garage_id INTEGER NOT NULL,
+                device_id TEXT,
+                device_info TEXT,
                 session_token TEXT UNIQUE NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 expires_at TEXT NOT NULL,
-                is_active INTEGER DEFAULT 1
+                last_seen_at TEXT,
+                is_active INTEGER DEFAULT 1,
+                revoked_at TEXT,
+                revoked_reason TEXT
             )''')
+
+            # ⭐ املأ كل الأعمدة NOT NULL بقيم
             conn.execute(
-                "INSERT INTO subscriber_sessions (subscriber_id, garage_id, session_token, expires_at) VALUES (?, ?, ?, ?)",
-                (subscriber_id, garage_id, token, expires)
+                """INSERT INTO subscriber_sessions 
+                   (subscriber_id, garage_id, device_id, device_info, session_token, expires_at, last_seen_at) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    subscriber_id,
+                    garage_id,
+                    'web_portal',           # ⭐ device_id افتراضي
+                    'web_browser',          # device_info
+                    token,
+                    expires,
+                    datetime.now().isoformat()
+                )
             )
             conn.commit()
         return token
     except Exception as e:
-        print(f"Token save error: {e}")
+        print(f"❌ Token save error: {e}")
+        import traceback
+        traceback.print_exc()
         return None
-
 
 def _validate_session_token(db_path, token):
     """يتحقق من token ويرجع (subscriber_id, garage_id) لو صالح"""
@@ -69,7 +88,6 @@ def _validate_session_token(db_path, token):
             row = cur.fetchone()
             if not row:
                 return None, None
-            # تحقق من انتهاء الصلاحية
             try:
                 exp_dt = datetime.fromisoformat(row['expires_at'])
                 if exp_dt < datetime.now():
@@ -77,9 +95,9 @@ def _validate_session_token(db_path, token):
             except Exception:
                 pass
             return row['subscriber_id'], row['garage_id']
-    except Exception:
+    except Exception as e:
+        print(f"Token validate error: {e}")
         return None, None
-
 
 def _revoke_session_token(db_path, token):
     """يلغي token (عند تسجيل الخروج)"""
