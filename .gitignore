@@ -1,0 +1,39 @@
+# ⭐ ملفات قاعدة البيانات (لا ترفعها على GitHub)
+*.db
+*.db-wal
+*.db-shm
+garages_registry.db
+garage.db
+garages/
+
+# ⭐ ملفات النظام المؤقتة
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# ⭐ ملفات بيئة العمل
+.env
+.venv/
+venv/
+env/
+
+# ⭐ إعدادات Streamlit
+.streamlit/secrets.toml
+
+# ⭐ ملفات الـ logs
+logs/
+*.log
+
+# ⭐ ملفات IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ⭐ ملفات نظام التشغيل
+.DS_Store
+Thumbs.db
+desktop.ini
