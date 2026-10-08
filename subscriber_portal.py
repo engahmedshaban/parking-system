@@ -118,7 +118,43 @@ def _revoke_session_token(db_path, token):
     except Exception:
         pass
 
+def get_app_status_for_portal(db_path, sub):
+    """يرجع (status, days, msg) — نسخة للبوابة"""
+    if not sub:
+        return 'expired', 0, 'غير مسجل'
 
+    if sub.get('app_subscription_active'):
+        end = sub.get('app_subscription_end')
+        if end:
+            try:
+                end_dt = datetime.fromisoformat(str(end).replace('Z', '').split('.')[0])
+                if end_dt >= datetime.now():
+                    days = max(0, (end_dt - datetime.now()).days)
+                    return 'active', days, f'✅ اشتراك نشط — يتبقى {days} يوم'
+            except Exception:
+                pass
+
+    reg = sub.get('registration_date')
+    if reg:
+        try:
+            reg_dt = datetime.fromisoformat(str(reg).replace('Z', '').split('.')[0])
+            trial_days = 3
+            try:
+                r = _query_one(db_path,
+                    "SELECT value FROM parking_settings WHERE key='app_trial_days'")
+                if r and r.get('value'):
+                    trial_days = int(r['value'])
+            except Exception:
+                pass
+
+            trial_end = reg_dt + timedelta(days=trial_days)
+            if trial_end >= datetime.now():
+                days = max(0, (trial_end - datetime.now()).days)
+                return 'trial', days, f'🎁 فترة تجريبية — يتبقى {days} يوم'
+        except Exception:
+            pass
+
+    return 'expired', 0, '❌ انتهى الاشتراك'
 def _reset_to_subscriber_portal():
     """⭐⭐⭐ يرجع لبوابة المشترك — يمسح الـ token ويسيب view=subscriber ⭐⭐⭐"""
     st.query_params.clear()
@@ -553,167 +589,27 @@ def expired_screen(sub):
         st.rerun()
 
 
-def app_payment_screen(db_path, sub):
-    garage_name = st.session_state.get('sub_portal_garage_name', '')
-    garage_id = st.session_state.get('sub_portal_garage_id', 1)
-
-    st.markdown(f"""
-    <div class="portal-header">
-        <div style="font-size: 48px;">📱</div>
-        <h1>اشتراك استخدام التطبيق</h1>
-        <p>🏢 {garage_name}</p>
-    </div>
-    <div class="sub-card">
-        <div class="name">👤 {sub.get('name', '')}</div>
-        <div class="car">🚗 {sub.get('car_number', '')}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    fee = float(get_setting(db_path, 'app_fee', '10'))
-    instapay = get_setting(db_path, 'instapay_number', '')
-    vodafone = get_setting(db_path, 'instapay_number', '')
-
-    st.markdown(f"""
-    <div class="pay-box">
-        <h2>💰 المطلوب دفعه شهرياً</h2>
-        <div class="amount">{fee:.0f} جنيه</div>
-        <div style="text-align: right; font-weight: bold;
-                    color: #667eea; margin: 12px 0;">
-            📌 طرق التحويل المتاحة:
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    if instapay:
-        st.markdown(f"""
-        <div class="pay-method">
-            <div class="label">💳 InstaPay</div>
-            <div class="value">{instapay}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    if vodafone:
-        st.markdown(f"""
-        <div class="pay-method">
-            <div class="label">💳 InstaPay</div>
-            <div class="value">{vodafone}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with st.form("app_pay_form"):
-        st.markdown("### 📝 بيانات التحويل")
-        method = st.selectbox("🔄 طريقة الدفع", ["InstaPay", "InstaPay"])
-        ref = st.text_input("🔢 رقم المرجع / آخر 4 أرقام")
-        notes = st.text_area("📝 ملاحظات (اختياري)", height=70)
-
-        if st.form_submit_button("✅ إرسال للمراجعة", use_container_width=True):
-            if not ref.strip():
-                st.error("❌ أدخل رقم المرجع")
-            else:
-                ok = _execute(
-                    db_path,
-                    "INSERT INTO app_payments "
-                    "(subscriber_id, garage_id, amount, method, reference_number, notes, status) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 'pending')",
-                    (sub['id'], garage_id, fee, method, ref.strip(), notes.strip())
-                )
-                if ok:
-                    st.success("✅ تم إرسال طلبك")
-                    st.info("⏳ سيتم مراجعة التحويل خلال دقائق")
-                else:
-                    st.error("❌ فشل الإرسال")
-
-    if st.button("🚪 تسجيل الخروج", key="logout_payment"):
-        _logout_and_redirect()
-        st.rerun()
-
-
-def main_screen(db_path, sub):
-    garage_name = st.session_state.get('sub_portal_garage_name', '')
-
-    st.markdown(f"""
-    <div class="portal-header">
-        <h1>🚗 أهلاً {sub.get('name', '')}</h1>
-        <p>🏢 {garage_name}</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    try:
-        end_dt = datetime.fromisoformat(sub['subscription_end']) if sub.get('subscription_end') else None
-        if end_dt:
-            days_left = (end_dt - datetime.now()).days
-            if days_left < 0:
-                cls, txt = "status-expired", f"⛔ منتهي منذ {abs(days_left)} يوم"
-            elif days_left <= 7:
-                cls, txt = "status-warning", f"⚠️ يتبقى {days_left} يوم"
-            else:
-                cls, txt = "status-ok", f"✅ نشط — يتبقى {days_left} يوم"
-        else:
-            cls, txt = "status-warning", "⚠️ لا يوجد تاريخ انتهاء"
-    except Exception:
-        cls, txt = "status-warning", "⚠️ خطأ في التاريخ"
-
-    st.markdown(f'<div class="{cls}">{txt}</div>', unsafe_allow_html=True)
-
-    spot_txt = get_spot_location_text(db_path, sub.get('spot_id'))
-    end_date = sub['subscription_end'][:10] if sub.get('subscription_end') else '—'
-
-    st.markdown(f"""
-    <div class="sub-card">
-        <div class="name">👤 {sub.get('name', '')}</div>
-        <div class="car">🚗 {sub.get('car_number', '')}</div>
-        <div class="row"><b>🅿️ مكان الركنة:</b> {spot_txt}</div>
-        <div class="row"><b>📅 انتهاء الاشتراك:</b> {end_date}</div>
-        <div class="row"><b>📱 الهاتف:</b> {sub.get('phone', '—')}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    qr_data = sub['car_number']  # ⭐ QR = رقم الكارت
-    qr_b64 = generate_qr_base64(qr_data)
-    if qr_b64:
-        st.markdown(f"""
-        <div class="qr-box">
-            <div class="qr-label">📱 امسح هذا الكود للدخول / الخروج</div>
-            <img src="data:image/png;base64,{qr_b64}" style="width:260px;height:260px;">
-        </div>
-        """, unsafe_allow_html=True)
-
-    bc_b64 = generate_barcode_base64(sub.get('car_number', ''))
-    if bc_b64:
-        st.markdown(f"""
-        <div class="qr-box">
-            <div class="qr-label">🏷️ باركود رقم الكارت</div>
-            <img src="data:image/png;base64,{bc_b64}" style="width:100%; max-width:360px;">
-        </div>
-        """, unsafe_allow_html=True)
-
-    app_end = sub.get('app_subscription_end')
-    app_active = sub.get('app_subscription_active')
-    if app_active and app_end:
-        try:
-            aed = datetime.fromisoformat(app_end)
-            a_days = (aed - datetime.now()).days
-            if a_days >= 0:
-                st.info(f"📱 اشتراك التطبيق: نشط — يتبقى {a_days} يوم")
-        except Exception:
-            pass
-
-    if st.button("🚪 تسجيل الخروج", key="logout_main"):
-        _logout_and_redirect()
-        st.rerun()
-
-
-# ============================================================
-#  📱 صفحة دفعات التطبيق للسوبر أدمن
-# ============================================================
 def show_app_payments(db):
     st.markdown("## 📱 دفعات اشتراك التطبيق")
+
+    # ⭐ فلاتر البحث
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        f_name = st.text_input("👤 الاسم", key="pay_f_name")
+    with c2:
+        f_phone = st.text_input("📱 الهاتف", key="pay_f_phone")
+    with c3:
+        f_garage = st.text_input("🏢 الجراج", key="pay_f_garage")
 
     garages = get_all_garages_from_registry()
     all_pending = []
 
     for g in garages:
         try:
+            # فلتر الجراج
+            if f_garage and f_garage.strip().lower() not in g['name'].lower():
+                continue
+
             db_path = g['db_path']
             if not os.path.exists(db_path):
                 continue
@@ -731,6 +627,13 @@ def show_app_payments(db):
                    ORDER BY ap.id DESC'''
             )
             for r in rows:
+                # فلتر الاسم
+                if f_name and f_name.strip().lower() not in (r.get('name') or '').lower():
+                    continue
+                # فلتر التلفون
+                if f_phone and f_phone.strip() not in (r.get('phone') or ''):
+                    continue
+
                 r['garage_id'] = g['id']
                 r['garage_name'] = g['name']
                 r['db_path'] = db_path
@@ -739,10 +642,10 @@ def show_app_payments(db):
             continue
 
     if not all_pending:
-        st.success("✅ لا توجد دفعات معلقة")
+        st.success("✅ لا توجد دفعات مطابقة")
         return
 
-    st.warning(f"⚠️ يوجد **{len(all_pending)}** دفعة في انتظار التأكيد")
+    st.warning(f"⚠️ يوجد **{len(all_pending)}** دفعة")
     st.markdown("---")
 
     for r in all_pending:
@@ -801,8 +704,181 @@ def show_app_payments(db):
                         st.rerun()
                     else:
                         st.error("❌ فشل")
+def main_screen(db_path, sub):
+    garage_name = st.session_state.get('sub_portal_garage_name', '')
 
+    st.markdown(f"""
+    <div class="portal-header">
+        <h1>🚗 أهلاً {sub.get('name', '')}</h1>
+        <p>🏢 {garage_name}</p>
+    </div>
+    """, unsafe_allow_html=True)
 
+    # ⭐ حالة اشتراك التطبيق
+    app_status, app_days, app_msg = get_app_status_for_portal(db_path, sub)
+
+    # ⭐ بطاقة الحالة
+    if app_status == 'active':
+        st.markdown(f'<div class="status-ok">📱 {app_msg}</div>', unsafe_allow_html=True)
+    elif app_status == 'trial':
+        st.markdown(f"""
+        <div class="status-warning">
+            {app_msg}<br>
+            <span style="font-size: 12px; opacity: 0.9;">
+                بعد انتهاء التجربة لن تتمكن من الدخول حتى تدفع اشتراك التطبيق
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("💳 ادفع الآن", use_container_width=True, key="pay_from_trial"):
+            st.session_state['show_payment_screen'] = True
+            st.rerun()
+    else:
+        st.markdown(f"""
+        <div class="status-expired">
+            {app_msg}<br>
+            <span style="font-size: 12px; opacity: 0.9;">
+                الكود ظاهر أدناه لكن لن يعمل عند البوابة
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("💳 اذهب لصفحة الدفع", use_container_width=True,
+                     type="primary", key="pay_from_expired"):
+            st.session_state['show_payment_screen'] = True
+            st.rerun()
+
+    # ⭐ حالة اشتراك الجراج
+    try:
+        end_dt = datetime.fromisoformat(sub['subscription_end']) if sub.get('subscription_end') else None
+        if end_dt:
+            days_left = (end_dt - datetime.now()).days
+            if days_left < 0:
+                cls, txt = "status-expired", f"⛔ اشتراك الجراج منتهي منذ {abs(days_left)} يوم"
+            elif days_left <= 7:
+                cls, txt = "status-warning", f"⚠️ اشتراك الجراج يتبقى {days_left} يوم"
+            else:
+                cls, txt = "status-ok", f"✅ اشتراك الجراج نشط — يتبقى {days_left} يوم"
+        else:
+            cls, txt = "status-warning", "⚠️ لا يوجد تاريخ انتهاء"
+    except Exception:
+        cls, txt = "status-warning", "⚠️ خطأ في التاريخ"
+
+    st.markdown(f'<div class="{cls}">{txt}</div>', unsafe_allow_html=True)
+
+    spot_txt = get_spot_location_text(db_path, sub.get('spot_id'))
+    end_date = sub['subscription_end'][:10] if sub.get('subscription_end') else '—'
+
+    st.markdown(f"""
+    <div class="sub-card">
+        <div class="name">👤 {sub.get('name', '')}</div>
+        <div class="car">🚗 {sub.get('car_number', '')}</div>
+        <div class="row"><b>🅿️ مكان الركنة:</b> {spot_txt}</div>
+        <div class="row"><b>📅 انتهاء الاشتراك:</b> {end_date}</div>
+        <div class="row"><b>📱 الهاتف:</b> {sub.get('phone', '—')}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ⭐ QR يظهر دايماً
+    qr_data = sub['car_number']
+    qr_b64 = generate_qr_base64(qr_data)
+    if qr_b64:
+        st.markdown(f"""
+        <div class="qr-box">
+            <div class="qr-label">📱 امسح هذا الكود للدخول / الخروج</div>
+            <img src="data:image/png;base64,{qr_b64}" style="width:260px;height:260px;">
+        </div>
+        """, unsafe_allow_html=True)
+
+    bc_b64 = generate_barcode_base64(sub.get('car_number', ''))
+    if bc_b64:
+        st.markdown(f"""
+        <div class="qr-box">
+            <div class="qr-label">🏷️ باركود رقم الكارت</div>
+            <img src="data:image/png;base64,{bc_b64}" style="width:100%; max-width:360px;">
+        </div>
+        """, unsafe_allow_html=True)
+
+    if st.button("🚪 تسجيل الخروج", key="logout_main"):
+        _logout_and_redirect()
+        st.rerun()
+
+# ============================================================
+#  📱 صفحة دفعات التطبيق للسوبر أدمن
+# ============================================================
+def app_payment_screen(db_path, sub):
+    """صفحة دفع اشتراك التطبيق"""
+    garage_name = st.session_state.get('sub_portal_garage_name', '')
+    garage_id = st.session_state.get('sub_portal_garage_id', 1)
+
+    st.markdown(f"""
+    <div class="portal-header">
+        <div style="font-size: 48px;">📱</div>
+        <h1>اشتراك استخدام التطبيق</h1>
+        <p>🏢 {garage_name}</p>
+    </div>
+    <div class="sub-card">
+        <div class="name">👤 {sub.get('name', '')}</div>
+        <div class="car">🚗 {sub.get('car_number', '')}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ⭐ قراءة الإعدادات
+    fee = float(get_setting(db_path, 'app_fee', '10'))
+    instapay = get_setting(db_path, 'instapay_number', '')
+    vodafone = get_setting(db_path, 'vodafone_cash_number', '')
+
+    st.markdown(f"""
+    <div class="pay-box">
+        <h2>💰 المطلوب دفعه شهرياً</h2>
+        <div class="amount">{fee:.0f} جنيه</div>
+        <div style="text-align: right; font-weight: bold;
+                    color: #667eea; margin: 12px 0;">
+            📌 طرق التحويل المتاحة:
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if instapay:
+        st.markdown(f"""
+        <div class="pay-method">
+            <div class="label">💳 InstaPay</div>
+            <div class="value">{instapay}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    if vodafone:
+        st.markdown(f"""
+        <div class="pay-method">
+            <div class="label">📱 Vodafone Cash</div>
+            <div class="value">{vodafone}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with st.form("app_pay_form"):
+        st.markdown("### 📝 بيانات التحويل")
+        method = st.selectbox("🔄 طريقة الدفع", ["InstaPay", "Vodafone Cash"])
+        ref = st.text_input("🔢 رقم المرجع / آخر 4 أرقام")
+        notes = st.text_area("📝 ملاحظات (اختياري)", height=70)
+
+        if st.form_submit_button("✅ إرسال للمراجعة", use_container_width=True):
+            if not ref.strip():
+                st.error("❌ أدخل رقم المرجع")
+            else:
+                ok = _execute(
+                    db_path,
+                    "INSERT INTO app_payments "
+                    "(subscriber_id, garage_id, amount, method, reference_number, notes, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+                    (sub['id'], garage_id, fee, method, ref.strip(), notes.strip())
+                )
+                if ok:
+                    st.success("✅ تم إرسال طلبك")
+                    st.info("⏳ سيتم مراجعة التحويل خلال دقائق")
+                else:
+                    st.error("❌ فشل الإرسال")
+
+    if st.button("🚪 تسجيل الخروج", key="logout_payment"):
+        _logout_and_redirect()
+        st.rerun()
 # ============================================================
 #  نقطة الدخول
 # ============================================================
@@ -887,7 +963,6 @@ def subscriber_portal_page(db=None):
         end_dt = None
 
     if end_dt and end_dt < datetime.now():
-        # إلغاء الـ token
         try:
             _revoke_session_token(db_path, st.session_state.get('sub_portal_token', ''))
         except Exception:
@@ -897,29 +972,15 @@ def subscriber_portal_page(db=None):
         footer()
         return
 
-    # 6) فحص اشتراك التطبيق
-    app_active = sub.get('app_subscription_active')
-    app_end = sub.get('app_subscription_end')
-    app_expired = False
-
-    if not app_active:
-        app_expired = True
-    else:
-        try:
-            if app_end:
-                aed = datetime.fromisoformat(
-                    str(app_end).replace('Z', '').split('.')[0]
-                )
-                if aed < datetime.now():
-                    app_expired = True
-        except Exception:
-            pass
-
-    if app_expired:
+    # 6) زر الدفع المؤقت
+    if st.session_state.get('show_payment_screen'):
+        if st.button("← العودة", key="back_from_pay"):
+            st.session_state.pop('show_payment_screen', None)
+            st.rerun()
         app_payment_screen(db_path, sub)
         footer()
         return
 
-    # 7) الشاشة الرئيسية
+    # 7) الشاشة الرئيسية (QR يظهر دايماً)
     main_screen(db_path, sub)
     footer()

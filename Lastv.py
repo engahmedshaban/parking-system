@@ -402,8 +402,54 @@ def set_system_expiry(db, expiry_date):
 # ===================================================================
 # ⭐⭐⭐ فحص اشتراك التطبيق + إدارة الجلسات ⭐⭐⭐
 # ===================================================================
+def get_subscriber_app_status(db, sub):
+    """
+    يرجع (status, days_remaining, msg)
+    status: 'active' | 'trial' | 'expired'
+    """
+    if not sub:
+        return 'expired', 0, 'غير مسجل'
+
+    # 1️⃣ اشتراك مدفوع نشط؟
+    if sub.get('app_subscription_active'):
+        end = sub.get('app_subscription_end')
+        if end:
+            try:
+                end_dt = datetime.fromisoformat(str(end).replace('Z', '').split('.')[0])
+                if end_dt >= datetime.now():
+                    days = max(0, (end_dt - datetime.now()).days)
+                    return 'active', days, f'✅ اشتراك نشط — يتبقى {days} يوم'
+            except Exception:
+                pass
+
+    # 2️⃣ فترة تجريبية؟
+    reg = sub.get('registration_date')
+    if reg:
+        try:
+            reg_dt = datetime.fromisoformat(str(reg).replace('Z', '').split('.')[0])
+            trial_days = 3
+            try:
+                r = db.execute_query(
+                    "SELECT value FROM parking_settings WHERE key='app_trial_days'",
+                    fetch=True
+                )
+                if r and r[0]['value']:
+                    trial_days = int(r[0]['value'])
+            except Exception:
+                pass
+
+            trial_end = reg_dt + timedelta(days=trial_days)
+            if trial_end >= datetime.now():
+                days = max(0, (trial_end - datetime.now()).days)
+                return 'trial', days, f'🎁 فترة تجريبية — يتبقى {days} يوم'
+        except Exception:
+            pass
+
+    return 'expired', 0, '❌ انتهى الاشتراك'
+
+
 def is_subscriber_app_active(sub):
-    """يتحقق إذا كان اشتراك التطبيق مفعّل وغير منتهي"""
+    """يبقى للتوافق مع الكود القديم — لكن الأفضل استخدام get_subscriber_app_status"""
     if not sub:
         return False
     if not sub.get('app_subscription_active'):
@@ -417,7 +463,6 @@ def is_subscriber_app_active(sub):
         return end_dt >= datetime.now()
     except Exception:
         return False
-
 
 def validate_subscriber_session(db, subscriber_id, session_token):
     """يتحقق من صلاحية الجلسة"""
@@ -878,7 +923,9 @@ class Database:
                             'hour_grace_minutes': '10', 'system_expiry_date': '',
                             'garage_name': DEFAULT_GARAGE_NAME,
                             'app_fee': '10',
-                            'instapay_number': INSTAPAY_NUMBER}
+                            'app_trial_days': '3',
+                             'instapay_number': INSTAPAY_NUMBER,
+                            'vodafone_cash_number': ''}
                 for k, v in defaults.items():
                     cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)', (k, v))
 
@@ -1824,44 +1871,50 @@ class SubscriberAttendanceManager:
 
     def record_entry(self, sid):
         try:
-            # حماية 1: اشتراك التطبيق
-            sub = self.db.execute_query(
-                "SELECT app_subscription_active, app_subscription_end FROM subscribers WHERE id=?",
+            # ⭐ فحص حالة اشتراك التطبيق (active / trial / expired)
+            sub_row = self.db.execute_query(
+                "SELECT * FROM subscribers WHERE id=?",
                 (sid,), fetch=True
             )
-            if sub:
-                sub_dict = dict(sub[0])
-                if not is_subscriber_app_active(sub_dict):
-                    app_log("warning", f"محاولة دخول مشترك غير مفعل: {sid}")
-                    return False
-
-            # حماية 2: وجود جلسة نشطة
-            active_sessions = self.db.execute_query(
-                """SELECT id FROM subscriber_sessions 
-                   WHERE subscriber_id=? AND is_active=1 AND expires_at > ?
-                   LIMIT 1""",
-                (sid, datetime.now().isoformat()), fetch=True
-            )
-            if not active_sessions:
-                app_log("warning", f"محاولة دخول بدون جلسة نشطة: {sid}")
-                # ممكن نخليه يعدي، أو نرفض
-                # return False  # ← فعّلها لو عايز إجبار الجلسة
-
-            if self.db.execute_query("SELECT id FROM subscriber_attendance WHERE subscriber_id=? AND status='inside'", (sid,), fetch=True):
+            if not sub_row:
                 return False
+
+            sub_dict = dict(sub_row[0])
+            status, days, msg = get_subscriber_app_status(self.db, sub_dict)
+
+            if status == 'expired':
+                app_log("warning", f"محاولة دخول مشترك منتهي: {sid} — {msg}")
+                return False
+
+            # ✅ active أو trial → يسمح بالدخول
+            if self.db.execute_query(
+                "SELECT id FROM subscriber_attendance WHERE subscriber_id=? AND status='inside'",
+                (sid,), fetch=True
+            ):
+                return False
+
             now = datetime.now().isoformat()
             mv = get_next_movement_number(self.db)
-            self.db.execute_query('INSERT INTO subscriber_attendance (subscriber_id, entry_time, status, movement_number) VALUES (?, ?, ?, ?)',
-                                  (sid, now, 'inside', mv), commit=True)
-            self.db.execute_query("UPDATE spots SET is_occupied=1, status='occupied' WHERE subscriber_id=?", (sid,), commit=True)
-            self.db.execute_query('INSERT INTO history (type, subscriber_id, spot_id, details, date, movement_number) VALUES (?, ?, ?, ?, ?, ?)',
-                                  ('subscriber_entry', sid, None, 'دخول مشترك', now, mv), commit=True)
+
+            self.db.execute_query(
+                'INSERT INTO subscriber_attendance (subscriber_id, entry_time, status, movement_number) VALUES (?, ?, ?, ?)',
+                (sid, now, 'inside', mv), commit=True
+            )
+            self.db.execute_query(
+                "UPDATE spots SET is_occupied=1, status='occupied' WHERE subscriber_id=?",
+                (sid,), commit=True
+            )
+
+            details = f'دخول مشترك ({status})'
+            self.db.execute_query(
+                'INSERT INTO history (type, subscriber_id, spot_id, details, date, movement_number) VALUES (?, ?, ?, ?, ?, ?)',
+                ('subscriber_entry', sid, None, details, now, mv), commit=True
+            )
             clear_all_caches()
             return True
         except Exception as e:
             app_log("error", f"record_entry: {e}")
             return False
-
     def record_exit(self, sid):
         try:
             active = self.db.execute_query("SELECT id FROM subscriber_attendance WHERE subscriber_id=? AND status='inside'", (sid,), fetch=True)
@@ -2011,16 +2064,21 @@ def locked_page(db):
 # ===================================================================
 def super_admin_page(db, manager):
     st.markdown("## 🔐 لوحة Super Admin")
-    t1, t2, t3 = st.tabs(["🏢 اسم الجراج والهيكل", "📅 صلاحية النظام", "👨‍💻 معلومات المطور"])
+    t1, t2, t3, t4 = st.tabs([
+        "🏢 اسم الجراج والهيكل",
+        "📅 صلاحية النظام",
+        "💰 سعر الخدمة والتجربة",
+        "👨‍💻 معلومات المطور"
+    ])
 
     with t1:
         _render_garage_config(db, manager)
     with t2:
         _render_license_config(db)
     with t3:
+        _render_app_fee_config(db)
+    with t4:
         _render_dev_info()
-
-
 def _render_garage_config(db, manager):
     st.markdown("### 🏷️ اسم الجراج")
     current_name = db.get_garage_name()
@@ -2143,7 +2201,78 @@ def _render_garage_config(db, manager):
             else:
                 st.error("❌ فشل الحفظ")
 
+def _render_app_fee_config(db):
+    st.markdown("### 💰 سعر خدمة التطبيق لهذا الجراج")
 
+    # ⭐ قراءة الإعدادات الحالية
+    def _get_setting(key, default=''):
+        r = db.execute_query(
+            "SELECT value FROM parking_settings WHERE key=?",
+            (key,), fetch=True
+        )
+        return r[0]['value'] if r and r[0]['value'] else default
+
+    current_fee = _get_setting('app_fee', '10')
+    current_trial = _get_setting('app_trial_days', '3')
+    current_instapay = _get_setting('instapay_number', '')
+    current_vodafone = _get_setting('vodafone_cash_number', '')
+
+    st.info(f"""
+    ⚙️ **الإعدادات الحالية:**
+    - 💵 سعر الاشتراك: **{current_fee} ج/شهر**
+    - 🎁 أيام تجريبية: **{current_trial} يوم**
+    """)
+
+    with st.form("app_fee_form"):
+        c1, c2 = st.columns(2)
+        with c1:
+            new_fee = st.number_input(
+                "💵 السعر الشهري (جنيه)",
+                min_value=0.0,
+                value=float(current_fee),
+                step=5.0,
+                key="fee_input"
+            )
+        with c2:
+            new_trial = st.number_input(
+                "🎁 الأيام التجريبية للمشترك الجديد",
+                min_value=0,
+                max_value=90,
+                value=int(current_trial),
+                step=1,
+                key="trial_input"
+            )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            instapay = st.text_input(
+                "💳 رقم InstaPay",
+                value=current_instapay,
+                key="instapay_input"
+            )
+        with c2:
+            vodafone = st.text_input(
+                "📱 رقم Vodafone Cash",
+                value=current_vodafone,
+                key="vodafone_input"
+            )
+
+        if st.form_submit_button("💾 حفظ الإعدادات",
+                                  use_container_width=True, type="primary"):
+            updates = {
+                'app_fee': str(new_fee),
+                'app_trial_days': str(new_trial),
+                'instapay_number': instapay.strip(),
+                'vodafone_cash_number': vodafone.strip(),
+            }
+            for k, v in updates.items():
+                db.execute_query(
+                    "INSERT OR REPLACE INTO parking_settings (key, value) VALUES (?, ?)",
+                    (k, v), commit=True
+                )
+            st.success("✅ تم الحفظ")
+            time.sleep(0.5)
+            st.rerun()
 def _render_license_config(db):
     st.markdown("### 📅 إدارة صلاحية النظام")
 
