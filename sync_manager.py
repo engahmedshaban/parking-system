@@ -1,4 +1,4 @@
-# sync_manager.py — محرك المزامنة (يعمل مع GitHub Gist أو HTTP)
+# sync_manager.py — محرك المزامنة (GitHub Gist)
 import sqlite3
 import json
 import os
@@ -7,24 +7,53 @@ import requests
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 
-
-# ⭐ تحميل المتغيرات من .env — ضيف السطرين دول
+# ⭐ تحميل .env
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
+
+
+# ============ اكتشاف قاعدة البيانات النشطة ============
+def _detect_active_db():
+    """يكتشف قاعدة بيانات الجراج النشط تلقائياً"""
+    # 1) من .env
+    env_db = os.environ.get('LOCAL_DB', '')
+    if env_db and os.path.exists(env_db):
+        return env_db
+
+    # 2) من registry
+    registry_path = 'garages_registry.db'
+    if os.path.exists('/data'):
+        registry_path = '/data/garages_registry.db'
+
+    if os.path.exists(registry_path):
+        try:
+            with sqlite3.connect(registry_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT db_path FROM garages WHERE is_active=1 ORDER BY id LIMIT 1"
+                ).fetchone()
+                if row and row['db_path'] and os.path.exists(row['db_path']):
+                    return row['db_path']
+        except Exception as e:
+            print(f"⚠️ Registry read error: {e}")
+
+    # 3) fallback
+    return 'garage.db'
+
+
 # ============ الإعدادات ============
 SYNC_MODE = os.environ.get('SYNC_MODE', 'local')
-LOCAL_DB = os.environ.get('LOCAL_DB', 'garage.db')
+LOCAL_DB = _detect_active_db()
 DEVICE_ID = os.environ.get('DEVICE_ID', 'garage-pc-1')
 SYNC_INTERVAL = int(os.environ.get('SYNC_INTERVAL', '300'))
 
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
 GIST_ID = os.environ.get('GIST_ID', '')
-# GitHub Gist كقناة نقل
-GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
-GIST_ID = os.environ.get('GIST_ID', '')
+
+print(f"📂 Sync Worker DB: {LOCAL_DB}")
 
 
 # ============ Helpers ============
@@ -32,6 +61,45 @@ def _get_local_conn():
     conn = sqlite3.connect(LOCAL_DB, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _ensure_sync_tables():
+    """يتأكد إن جداول المزامنة موجودة"""
+    try:
+        conn = _get_local_conn()
+        cur = conn.cursor()
+
+        cur.execute('''CREATE TABLE IF NOT EXISTS sync_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            table_name TEXT NOT NULL,
+            record_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            data TEXT,
+            timestamp TEXT NOT NULL,
+            device_id TEXT,
+            synced INTEGER DEFAULT 0
+        )''')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_sync_synced ON sync_log(synced)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_sync_time ON sync_log(timestamp)')
+
+        for table in ['subscribers', 'visitors', 'spots']:
+            try:
+                cur.execute(f"PRAGMA table_info({table})")
+                cols = [c[1] for c in cur.fetchall()]
+                if cols and 'updated_at' not in cols:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN updated_at TEXT")
+            except Exception:
+                pass
+
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"⚠️ ensure_sync_tables error: {e}")
+        return False
+
+
+_ensure_sync_tables()
 
 
 # ============ GitHub Gist Transport ============
@@ -46,6 +114,7 @@ def _gist_read():
             timeout=15
         )
         if r.status_code != 200:
+            print(f"⚠️ Gist read HTTP {r.status_code}")
             return None
         files = r.json().get('files', {})
         sync_file = files.get('sync.json', {})
@@ -86,10 +155,8 @@ def push_changes():
         if not changes:
             return 0, "no_changes"
 
-        # نقرأ الـ Gist الحالي
         gist_data = _gist_read() or {'pending': [], 'last_update': None}
 
-        # نضيف التغييرات مع tag الجهاز
         for ch in changes:
             gist_data['pending'].append({
                 'device': DEVICE_ID,
@@ -102,11 +169,9 @@ def push_changes():
 
         gist_data['last_update'] = datetime.now().isoformat()
 
-        # نكتب في الـ Gist
         if not _gist_write(gist_data):
             return 0, "gist_write_failed"
 
-        # نحدّث state المحلي
         conn = _get_local_conn()
         cur = conn.cursor()
         ids = [c['id'] for c in changes]
@@ -128,14 +193,11 @@ def pull_changes():
             return 0, "gist_read_failed"
 
         pending = gist_data.get('pending', [])
-
-        # نفلتر التغييرات اللي مش من جهازنا
         incoming = [c for c in pending if c.get('device') != DEVICE_ID]
 
         if not incoming:
             return 0, "no_changes"
 
-        # نطبّقها
         applied = 0
         remaining = []
 
@@ -144,20 +206,15 @@ def pull_changes():
 
         for ch in incoming:
             try:
-                conflict = _apply_change(cur, ch)
-                if not conflict:
-                    applied += 1
-                # لو فيه تعارض → نتجاهله (last-write-wins بالفعل في _apply_change)
+                _apply_change(cur, ch)
                 applied += 1
             except Exception as e:
                 print(f"Apply error: {e}")
-                # نحتفظ بيها لو فشلت
                 remaining.append(ch)
 
         conn.commit()
         conn.close()
 
-        # نحدّث الـ Gist: نحذف اللي طبقناه
         if applied > 0:
             new_pending = [c for c in pending if c.get('device') == DEVICE_ID] + remaining
             gist_data['pending'] = new_pending
@@ -169,26 +226,19 @@ def pull_changes():
 
 
 def _apply_change(cur, ch):
-    """
-    يطبق تغيير من جهاز آخر مع كشف التعارض
-    يرجع True لو فيه تعارض (تجاهلنا التغيير)
-    """
+    """يطبق تغيير من جهاز آخر (Last-Write-Wins)"""
     table = ch['table']
     op = ch['op']
     data = ch.get('data')
     remote_time = ch.get('timestamp', '')
 
-    # Whitelist للجداول (ممنوع نعدّل مستخدمين أو جلسات)
     allowed = ['subscribers', 'spots', 'visitors', 'subscriber_attendance']
     if table not in allowed:
-        return True  # تجاهل
+        return False
 
-    # ---------- كشف التعارض ----------
-    # لو نفس الركنة/المشترك اتعدّل محلياً بعد وقت التغيير الوارد
+    # كشف التعارض
     if table in ('subscribers', 'spots'):
         record_id = str(ch['record_id'])
-
-        # نجيب updated_at المحلي
         cur.execute(f"PRAGMA table_info({table})")
         cols = [c[1] for c in cur.fetchall()]
 
@@ -197,19 +247,16 @@ def _apply_change(cur, ch):
             row = cur.fetchone()
             if row and row[0]:
                 local_time = row[0]
-                # Last-write-wins
                 if local_time > remote_time:
-                    return True  # نحتفظ بالمحلي، نتجاهل الوارد
+                    return False  # نحتفظ بالمحلي
 
-    # ---------- تطبيق التغيير ----------
     if op == 'delete':
         cur.execute(f"DELETE FROM {table} WHERE id=?", (ch['record_id'],))
-        return False
+        return True
 
     if not data:
         return False
 
-    # نبني INSERT OR REPLACE
     cur.execute(f"PRAGMA table_info({table})")
     table_cols = [c[1] for c in cur.fetchall()]
 
@@ -218,24 +265,21 @@ def _apply_change(cur, ch):
         return False
 
     vals = [data[c] for c in cols_to_use]
-    placeholders = ','.join('?' * len(cols_to_use))
-    cols_str = ','.join(cols_to_use)
 
-    # INSERT OR REPLACE
     if op in ('insert', 'update'):
-        # نتأكد من وجود updated_at
         if 'updated_at' not in cols_to_use and 'updated_at' in table_cols:
             cols_to_use.append('updated_at')
             vals.append(datetime.now().isoformat())
-            cols_str = ','.join(cols_to_use)
-            placeholders = ','.join('?' * len(cols_to_use))
+
+        placeholders = ','.join('?' * len(cols_to_use))
+        cols_str = ','.join(cols_to_use)
 
         cur.execute(
             f"INSERT OR REPLACE INTO {table} ({cols_str}) VALUES ({placeholders})",
             vals
         )
 
-    return False
+    return True
 
 
 def sync_now():
@@ -258,16 +302,18 @@ def get_sync_status():
         return {
             'mode': SYNC_MODE,
             'device_id': DEVICE_ID,
+            'db_path': LOCAL_DB,
             'pending': pending,
             'gist_configured': bool(GITHUB_TOKEN and GIST_ID),
         }
     except Exception as e:
-        return {'error': str(e)}
+        return {'error': str(e), 'db_path': LOCAL_DB}
 
 
 def sync_loop():
     """الحلقة الرئيسية"""
     print(f"🔄 Sync Worker | Mode: {SYNC_MODE} | Device: {DEVICE_ID}")
+    print(f"   DB: {LOCAL_DB}")
     print(f"   Interval: {SYNC_INTERVAL}s | Gist: {'✅' if GIST_ID else '❌'}")
 
     while True:

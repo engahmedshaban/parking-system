@@ -23,14 +23,12 @@ from io import BytesIO
 import base64
 from PIL import Image
 
-# ⭐ تحميل .env — ضيف السطرين دول
+# ⭐ تحميل .env
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
-
-# باقي الكود زي ما هو...
 
 try:
     import barcode
