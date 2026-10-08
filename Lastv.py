@@ -37,7 +37,29 @@ try:
 except Exception:
     subscriber_portal_page = None
     show_app_payments = None
+# ===================== تقارير Excel / PDF =====================
+try:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
 
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
+                                     Paragraph, Spacer, Image as RLImage)
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
 # ===================== بيانات المطور =====================
 DEVELOPER_NAME = "مهندس أحمد شعبان"
 DEVELOPER_PHONE = "01095387792"
@@ -295,6 +317,281 @@ def generate_qr_content_from_fields(fields):
     return "\n".join([f"{f['label']}: {f['value']}" for f in fields])
 
 
+def _ar(text):
+    """يعالج النص العربي لـ PDF"""
+    if not PDF_AVAILABLE:
+        return str(text)
+    try:
+        reshaped = arabic_reshaper.reshape(str(text))
+        return get_display(reshaped)
+    except Exception:
+        return str(text)
+
+
+def _setup_arabic_font():
+    """يسجل خط عربي في reportlab"""
+    if not PDF_AVAILABLE:
+        return None
+    try:
+        # هنستخدم خط Cairo من النظام أو الافتراضي
+        font_paths = [
+            'Cairo-Regular.ttf',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            'C:\\Windows\\Fonts\\arial.ttf',
+            'C:\\Windows\\Fonts\\tahoma.ttf',
+        ]
+        for fp in font_paths:
+            if os.path.exists(fp):
+                pdfmetrics.registerFont(TTFont('ArabicFont', fp))
+                return 'ArabicFont'
+    except Exception:
+        pass
+    return 'Helvetica'
+
+
+def export_to_excel(manager, data_type='subscribers', filters=None):
+    """
+    يصدّر البيانات لملف Excel
+    data_type: 'subscribers' | 'visitors' | 'financial' | 'inside'
+    """
+    if not EXCEL_AVAILABLE:
+        return None
+
+    try:
+        df = pd.DataFrame()
+
+        if data_type == 'subscribers':
+            subs = manager.get_all_subscribers()
+            if subs:
+                data = []
+                for r in subs:
+                    end_dt = datetime.fromisoformat(r[9]) if r[9] else None
+                    days_left = (end_dt - datetime.now()).days if end_dt else None
+                    data.append({
+                        'المعرف': r[0],
+                        'الاسم': r[1] or '',
+                        'جهة العمل': r[2] or '',
+                        'رقم الكارت': r[3] or '',
+                        'نوع السيارة': r[4] or '',
+                        'رقم السيارة': r[5] or '',
+                        'الهاتف': r[6] or '',
+                        'نوع الاشتراك': r[7] or '',
+                        'بداية': r[8][:10] if r[8] else '',
+                        'نهاية': r[9][:10] if r[9] else '',
+                        'أيام متبقية': days_left if days_left is not None else '',
+                        'المكان': get_spot_location(r[13]) if r[13] else 'غير مخصص',
+                    })
+                df = pd.DataFrame(data)
+
+        elif data_type == 'financial':
+            rec = manager.get_all_financial_records()
+            if rec:
+                data = [{
+                    'المعرف': r[0],
+                    'المشترك': r[1] or '-',
+                    'النوع': r[2],
+                    'المبلغ': r[3],
+                    'الحالة': r[4],
+                    'الوصف': r[5],
+                    'التاريخ': r[6][:16] if r[6] else '',
+                } for r in rec]
+                df = pd.DataFrame(data)
+
+        elif data_type == 'visitors':
+            vis = manager.visitor_manager.get_visitors_financial_report() if hasattr(manager, 'visitor_manager') else []
+            if not vis:
+                # من manager.db مباشرة
+                rows = manager.db.execute_query(
+                    "SELECT ticket_number, entry_time, exit_time, vehicle_number, "
+                    "duration_minutes, amount, payment_status, phone "
+                    "FROM visitors ORDER BY entry_time DESC LIMIT 5000",
+                    fetch=True
+                ) or []
+                data = [{
+                    'التذكرة': r['ticket_number'],
+                    'السيارة': r['vehicle_number'],
+                    'الهاتف': r['phone'] or '-',
+                    'الدخول': r['entry_time'][:16] if r['entry_time'] else '',
+                    'الخروج': r['exit_time'][:16] if r['exit_time'] else '',
+                    'المدة (دقيقة)': r['duration_minutes'],
+                    'المبلغ': r['amount'],
+                    'الحالة': r['payment_status'],
+                } for r in rows]
+                df = pd.DataFrame(data)
+
+        elif data_type == 'inside':
+            inside = get_cached_active_visitors(manager.db.db_path)
+            if inside:
+                data = [{
+                    'التذكرة': v['ticket_number'],
+                    'السيارة': v.get('vehicle_number', ''),
+                    'الهاتف': v.get('phone', '') or '-',
+                    'الدخول': v['entry_time'][:16] if v.get('entry_time') else '',
+                    'المكان': get_spot_location(v['spot_id']) if v.get('spot_id') else 'غير مخصص',
+                } for v in inside]
+                df = pd.DataFrame(data)
+
+        if df.empty:
+            return None
+
+        # هنكتب لـ BytesIO
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+            df.to_excel(writer, sheet_name='Data', index=False)
+
+            workbook = writer.book
+            worksheet = writer.sheets['Data']
+
+            # تنسيق الهيدر
+            header_fmt = workbook.add_format({
+                'bold': True,
+                'bg_color': '#667eea',
+                'font_color': 'white',
+                'align': 'center',
+                'valign': 'vcenter',
+                'border': 1,
+            })
+
+            # ضبط عرض الأعمدة
+            for idx, col in enumerate(df.columns):
+                col_width = max(len(str(col)) + 2, df[col].astype(str).str.len().max() + 2) if len(df) > 0 else 15
+                col_width = min(col_width, 40)
+                worksheet.set_column(idx, idx, col_width)
+                worksheet.write(0, idx, col, header_fmt)
+
+            # تجميد الصف الأول
+            worksheet.freeze_panes(1, 0)
+
+        buf.seek(0)
+        return buf.getvalue()
+
+    except Exception as e:
+        print(f"Excel export error: {e}")
+        return None
+
+
+def export_to_pdf(manager, data_type='subscribers'):
+    """
+    يصدّر البيانات لملف PDF مع دعم العربي
+    """
+    if not PDF_AVAILABLE:
+        return None
+
+    try:
+        font_name = _setup_arabic_font()
+        garage_name = get_garage_name_cached()
+
+        # نجمع البيانات
+        rows = []
+        title = ''
+
+        if data_type == 'subscribers':
+            title = 'قائمة المشتركين'
+            subs = manager.get_all_subscribers()
+            for r in subs:
+                end_dt = datetime.fromisoformat(r[9]) if r[9] else None
+                days_left = (end_dt - datetime.now()).days if end_dt else '-'
+                rows.append([
+                    _ar(r[1] or ''),
+                    _ar(r[3] or ''),
+                    _ar(r[6] or ''),
+                    _ar(r[7] or ''),
+                    _ar(r[9][:10] if r[9] else ''),
+                    _ar(str(days_left)),
+                ])
+            headers = [_ar(h) for h in ['الاسم', 'رقم الكارت', 'الهاتف', 'الاشتراك', 'النهاية', 'متبقي']]
+
+        elif data_type == 'financial':
+            title = 'المعاملات المالية'
+            rec = manager.get_all_financial_records()
+            for r in rec[:500]:  # حد أقصى 500
+                rows.append([
+                    _ar(r[2] or ''),
+                    _ar(str(r[3]) if r[3] else ''),
+                    _ar(r[4] or ''),
+                    _ar((r[5] or '')[:50]),
+                    _ar(r[6][:16] if r[6] else ''),
+                ])
+            headers = [_ar(h) for h in ['النوع', 'المبلغ', 'الحالة', 'الوصف', 'التاريخ']]
+
+        elif data_type == 'inside':
+            title = 'الزوار داخل الجراج'
+            inside = get_cached_active_visitors(manager.db.db_path)
+            for v in inside:
+                rows.append([
+                    _ar(v['ticket_number']),
+                    _ar(v.get('vehicle_number', '')),
+                    _ar(v.get('phone', '') or '-'),
+                    _ar(v['entry_time'][:16] if v.get('entry_time') else ''),
+                    _ar(get_spot_location(v['spot_id']) if v.get('spot_id') else '-'),
+                ])
+            headers = [_ar(h) for h in ['التذكرة', 'السيارة', 'الهاتف', 'الدخول', 'المكان']]
+
+        if not rows:
+            return None
+
+        # نبني PDF
+        buf = BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=A4,
+                                rightMargin=1 * cm, leftMargin=1 * cm,
+                                topMargin=1.5 * cm, bottomMargin=1.5 * cm)
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Title'],
+            fontName=font_name,
+            fontSize=18,
+            alignment=1,  # center
+            spaceAfter=6,
+        )
+        sub_style = ParagraphStyle(
+            'CustomSub',
+            parent=styles['Normal'],
+            fontName=font_name,
+            fontSize=10,
+            alignment=1,
+            textColor=colors.grey,
+        )
+
+        story = []
+
+        # العنوان
+        story.append(Paragraph(_ar(garage_name), title_style))
+        story.append(Paragraph(_ar(title), title_style))
+        story.append(Paragraph(_ar(f'التاريخ: {datetime.now().strftime("%Y-%m-%d %H:%M")}'), sub_style))
+        story.append(Spacer(1, 0.5 * cm))
+
+        # الجدول
+        data = [headers] + rows
+        table = Table(data, repeatRows=1)
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#667eea')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('FONTNAME', (0, 0), (-1, -1), font_name),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f7fa')]),
+        ]))
+        story.append(table)
+
+        story.append(Spacer(1, 0.5 * cm))
+        story.append(Paragraph(
+            _ar(f'تم التطوير بواسطة: {DEVELOPER_NAME} | {DEVELOPER_PHONE}'),
+            sub_style
+        ))
+
+        doc.build(story)
+        buf.seek(0)
+        return buf.getvalue()
+
+    except Exception as e:
+        print(f"PDF export error: {e}")
+        return None
 def get_paper_width_from_settings(db):
     try:
         result = db.execute_query("SELECT value FROM parking_settings WHERE key='paper_width'", fetch=True)
@@ -3834,8 +4131,7 @@ def show_financial_reports(manager, visitor_manager):
 
 def show_reports(manager):
     st.markdown("## 📊 التقارير")
-    t1, t2, t3, t4 = st.tabs(["📈 عامة", "📋 الإشغال", "👤 المشتركين", "🚗 الزوار النشطين"])
-
+    t1, t2, t3, t4, t5 = st.tabs(["📈 عامة", "📋 الإشغال", "👤 المشتركين", "🚗 الزوار النشطين", "📥 تصدير"])
     with t1:
         stats = get_cached_dashboard_stats(manager.db.db_path)
         tot = stats['total']; oc = stats['occupied']; sb = stats['subs']
@@ -3943,6 +4239,89 @@ def show_reports(manager):
                 st.download_button("📥 تصدير CSV", csv, f"active_visitors_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv", use_container_width=True)
         else:
             st.info("✅ لا يوجد زوار داخل الجراج حالياً")
+
+    with t5:
+        st.markdown("### 📥 تصدير التقارير")
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            st.markdown("#### 📊 Excel")
+            if not EXCEL_AVAILABLE:
+                st.error("❌ مكتبة openpyxl مش مثبتة")
+            else:
+                if st.button("📥 تصدير المشتركين (Excel)", use_container_width=True, key="xl_subs"):
+                    data = export_to_excel(manager, 'subscribers')
+                    if data:
+                        st.download_button(
+                            "💾 تنزيل الملف",
+                            data,
+                            f"subscribers_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_subs"
+                        )
+
+                if st.button("📥 تصدير المعاملات المالية (Excel)", use_container_width=True, key="xl_fin"):
+                    data = export_to_excel(manager, 'financial')
+                    if data:
+                        st.download_button(
+                            "💾 تنزيل الملف",
+                            data,
+                            f"financial_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_fin"
+                        )
+
+                if st.button("📥 تصدير الزوار (Excel)", use_container_width=True, key="xl_vis"):
+                    data = export_to_excel(manager, 'visitors')
+                    if data:
+                        st.download_button(
+                            "💾 تنزيل الملف",
+                            data,
+                            f"visitors_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_vis"
+                        )
+
+        with c2:
+            st.markdown("#### 📄 PDF")
+            if not PDF_AVAILABLE:
+                st.error("❌ مكتبات PDF مش مثبتة")
+            else:
+                if st.button("📄 تصدير المشتركين (PDF)", use_container_width=True, key="pdf_subs"):
+                    data = export_to_pdf(manager, 'subscribers')
+                    if data:
+                        st.download_button(
+                            "💾 تنزيل الملف",
+                            data,
+                            f"subscribers_{datetime.now().strftime('%Y%m%d')}.pdf",
+                            "application/pdf",
+                            key="dl_pdf_subs"
+                        )
+                    else:
+                        st.warning("لا توجد بيانات")
+
+                if st.button("📄 تصدير المعاملات المالية (PDF)", use_container_width=True, key="pdf_fin"):
+                    data = export_to_pdf(manager, 'financial')
+                    if data:
+                        st.download_button(
+                            "💾 تنزيل الملف",
+                            data,
+                            f"financial_{datetime.now().strftime('%Y%m%d')}.pdf",
+                            "application/pdf",
+                            key="dl_pdf_fin"
+                        )
+
+                if st.button("📄 تصدير الزوار الحاليين (PDF)", use_container_width=True, key="pdf_inside"):
+                    data = export_to_pdf(manager, 'inside')
+                    if data:
+                        st.download_button(
+                            "💾 تنزيل الملف",
+                            data,
+                            f"inside_{datetime.now().strftime('%Y%m%d')}.pdf",
+                            "application/pdf",
+                            key="dl_pdf_inside"
+                        )
 
 
 def show_alerts(manager):
