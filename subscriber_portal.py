@@ -9,7 +9,8 @@ import time
 import json
 import os
 import sqlite3
-import extra_streamlit_components as stx
+import secrets
+
 try:
     import barcode
     from barcode.writer import ImageWriter
@@ -20,11 +21,14 @@ except ImportError:
 DEVELOPER_NAME = "مهندس أحمد شعبان"
 DEVELOPER_PHONE = "01095387792"
 
-import secrets
 
+# ============================================================
+#  ⭐⭐⭐ Session Token Helpers ⭐⭐⭐
+# ============================================================
 def _generate_session_token():
     """يولّد token فريد"""
     return secrets.token_urlsafe(32)
+
 
 def _save_session_token(db_path, subscriber_id, garage_id):
     """يحفظ token في قاعدة البيانات"""
@@ -49,7 +53,6 @@ def _save_session_token(db_path, subscriber_id, garage_id):
                 revoked_reason TEXT
             )''')
 
-            # ⭐ املأ كل الأعمدة NOT NULL بقيم
             conn.execute(
                 """INSERT INTO subscriber_sessions 
                    (subscriber_id, garage_id, device_id, device_info, session_token, expires_at, last_seen_at) 
@@ -57,8 +60,8 @@ def _save_session_token(db_path, subscriber_id, garage_id):
                 (
                     subscriber_id,
                     garage_id,
-                    'web_portal',           # ⭐ device_id افتراضي
-                    'web_browser',          # device_info
+                    'web_portal',
+                    'web_browser',
                     token,
                     expires,
                     datetime.now().isoformat()
@@ -71,6 +74,7 @@ def _save_session_token(db_path, subscriber_id, garage_id):
         import traceback
         traceback.print_exc()
         return None
+
 
 def _validate_session_token(db_path, token):
     """يتحقق من token ويرجع (subscriber_id, garage_id) لو صالح"""
@@ -99,6 +103,7 @@ def _validate_session_token(db_path, token):
         print(f"Token validate error: {e}")
         return None, None
 
+
 def _revoke_session_token(db_path, token):
     """يلغي token (عند تسجيل الخروج)"""
     if not token:
@@ -112,8 +117,36 @@ def _revoke_session_token(db_path, token):
             conn.commit()
     except Exception:
         pass
+
+
+def _reset_to_subscriber_portal():
+    """⭐⭐⭐ يرجع لبوابة المشترك — يمسح الـ token ويسيب view=subscriber ⭐⭐⭐"""
+    st.query_params.clear()
+    st.query_params["view"] = "subscriber"
+
+
+def _logout_and_redirect():
+    """⭐ تسجيل خروج موحد — يحتفظ بـ view=subscriber"""
+    # إلغاء الـ token
+    try:
+        db_path = st.session_state.get('sub_portal_garage_db_path')
+        token = st.session_state.get('sub_portal_token')
+        if db_path and token:
+            _revoke_session_token(db_path, token)
+    except Exception:
+        pass
+
+    # مسح session_state
+    for k in list(st.session_state.keys()):
+        if k.startswith('sub_portal_'):
+            st.session_state.pop(k, None)
+
+    # امسح الـ token وسيب view=subscriber
+    _reset_to_subscriber_portal()
+
+
 # ============================================================
-#  SQLite helpers مباشرة (بدون Database class)
+#  SQLite helpers مباشرة
 # ============================================================
 def _query_one(db_path, query, params=()):
     """يرجع صف واحد كـ dict"""
@@ -209,6 +242,8 @@ def get_all_garages_from_registry():
         )
     except Exception:
         return []
+
+
 # ============================================================
 #  QR & Barcode
 # ============================================================
@@ -444,7 +479,7 @@ def login_screen():
     if st.button("← تغيير الجراج", key="change_garage"):
         for k in ['sub_portal_garage_id', 'sub_portal_garage_name', 'sub_portal_garage_db_path']:
             st.session_state.pop(k, None)
-        st.query_params.clear()
+        _reset_to_subscriber_portal()
         st.rerun()
 
     with st.form("sub_login"):
@@ -486,6 +521,7 @@ def login_screen():
                     time.sleep(0.3)
                     st.rerun()
 
+
 def expired_screen(sub):
     st.markdown("""
     <div class="portal-header">
@@ -512,25 +548,10 @@ def expired_screen(sub):
     </div>
     """, unsafe_allow_html=True)
 
-    if st.button("🚪 تسجيل الخروج", key="logout_main"):
-        # ⭐ إلغاء الـ token
-        try:
-            db_path = st.session_state.get('sub_portal_garage_db_path')
-            token = st.session_state.get('sub_portal_token')
-            if db_path and token:
-                _revoke_session_token(db_path, token)
-        except Exception:
-            pass
-
-        # ⭐ مسح session_state
-        for k in list(st.session_state.keys()):
-            if k.startswith('sub_portal_'):
-                st.session_state.pop(k, None)
-
-        # ⭐⭐⭐ امسح الـ token من الرابط ⭐⭐⭐
-        st.query_params.clear()
-
+    if st.button("🚪 تسجيل الخروج", key="logout_expired"):
+        _logout_and_redirect()
         st.rerun()
+
 
 def app_payment_screen(db_path, sub):
     garage_name = st.session_state.get('sub_portal_garage_name', '')
@@ -550,7 +571,7 @@ def app_payment_screen(db_path, sub):
 
     fee = float(get_setting(db_path, 'app_fee', '10'))
     instapay = get_setting(db_path, 'instapay_number', '')
-    vodafone = get_setting(db_path, 'instapay_number', '')
+    vodafone = get_setting(db_path, 'vodafone_cash_number', '')
 
     st.markdown(f"""
     <div class="pay-box">
@@ -574,15 +595,14 @@ def app_payment_screen(db_path, sub):
     if vodafone:
         st.markdown(f"""
         <div class="pay-method">
-            <div class="label">💳 instapay</div>
-            <div class="value">{instapay}</div>
+            <div class="label">📱 Vodafone Cash</div>
+            <div class="value">{vodafone}</div>
         </div>
         """, unsafe_allow_html=True)
 
     with st.form("app_pay_form"):
         st.markdown("### 📝 بيانات التحويل")
-        method = st.selectbox("🔄 طريقة الدفع",
-                              ["InstaPay"])
+        method = st.selectbox("🔄 طريقة الدفع", ["InstaPay", "Vodafone Cash"])
         ref = st.text_input("🔢 رقم المرجع / آخر 4 أرقام")
         notes = st.text_area("📝 ملاحظات (اختياري)", height=70)
 
@@ -603,25 +623,10 @@ def app_payment_screen(db_path, sub):
                 else:
                     st.error("❌ فشل الإرسال")
 
-    if st.button("🚪 تسجيل الخروج", key="logout_main"):
-        # ⭐ إلغاء الـ token
-        try:
-            db_path = st.session_state.get('sub_portal_garage_db_path')
-            token = st.session_state.get('sub_portal_token')
-            if db_path and token:
-                _revoke_session_token(db_path, token)
-        except Exception:
-            pass
-
-        # ⭐ مسح session_state
-        for k in list(st.session_state.keys()):
-            if k.startswith('sub_portal_'):
-                st.session_state.pop(k, None)
-
-        # ⭐⭐⭐ امسح الـ token من الرابط ⭐⭐⭐
-        st.query_params.clear()
-
+    if st.button("🚪 تسجيل الخروج", key="logout_payment"):
+        _logout_and_redirect()
         st.rerun()
+
 
 def main_screen(db_path, sub):
     garage_name = st.session_state.get('sub_portal_garage_name', '')
@@ -663,7 +668,7 @@ def main_screen(db_path, sub):
     </div>
     """, unsafe_allow_html=True)
 
-    qr_data = sub['car_number']  # ⭐ QR = ID مشترك فقط
+    qr_data = sub['car_number']  # ⭐ QR = رقم الكارت
     qr_b64 = generate_qr_base64(qr_data)
     if qr_b64:
         st.markdown(f"""
@@ -694,24 +699,9 @@ def main_screen(db_path, sub):
             pass
 
     if st.button("🚪 تسجيل الخروج", key="logout_main"):
-        # ⭐ إلغاء الـ token
-        try:
-            db_path = st.session_state.get('sub_portal_garage_db_path')
-            token = st.session_state.get('sub_portal_token')
-            if db_path and token:
-                _revoke_session_token(db_path, token)
-        except Exception:
-            pass
-
-        # ⭐ مسح session_state
-        for k in list(st.session_state.keys()):
-            if k.startswith('sub_portal_'):
-                st.session_state.pop(k, None)
-
-        # ⭐⭐⭐ امسح الـ token من الرابط ⭐⭐⭐
-        st.query_params.clear()
-
+        _logout_and_redirect()
         st.rerun()
+
 
 # ============================================================
 #  📱 صفحة دفعات التطبيق للسوبر أدمن
@@ -815,6 +805,7 @@ def show_app_payments(db):
 
 # ============================================================
 #  نقطة الدخول
+# ============================================================
 def subscriber_portal_page(db=None):
     """db parameter موجود للتوافق فقط — لا يُستخدم"""
     inject_mobile_css()
@@ -826,7 +817,6 @@ def subscriber_portal_page(db=None):
     if not st.session_state.get('sub_portal_logged_in') and token:
         try:
             garages = get_all_garages_from_registry()
-            # ابحث في كل الجراجات عن الـ token
             for g in garages:
                 db_path = g['db_path']
                 if not os.path.exists(db_path):
@@ -835,7 +825,6 @@ def subscriber_portal_page(db=None):
 
                 sub_id, gid = _validate_session_token(db_path, token)
                 if sub_id:
-                    # ✅ token صالح — استرجع الجلسة
                     sub = _query_one(db_path, "SELECT * FROM subscribers WHERE id=?", (sub_id,))
                     if sub:
                         st.session_state['sub_portal_logged_in'] = True
@@ -870,7 +859,7 @@ def subscriber_portal_page(db=None):
             for k in list(st.session_state.keys()):
                 if k.startswith('sub_portal_'):
                     st.session_state.pop(k, None)
-            st.query_params.clear()
+            _reset_to_subscriber_portal()
             st.rerun()
         return
 
@@ -885,7 +874,7 @@ def subscriber_portal_page(db=None):
             for k in list(st.session_state.keys()):
                 if k.startswith('sub_portal_'):
                     st.session_state.pop(k, None)
-            st.query_params.clear()
+            _reset_to_subscriber_portal()
             st.rerun()
         return
 
@@ -898,12 +887,12 @@ def subscriber_portal_page(db=None):
         end_dt = None
 
     if end_dt and end_dt < datetime.now():
-        # ⭐ إلغاء الـ token
+        # إلغاء الـ token
         try:
             _revoke_session_token(db_path, st.session_state.get('sub_portal_token', ''))
         except Exception:
             pass
-        st.query_params.clear()
+        _reset_to_subscriber_portal()
         expired_screen(sub)
         footer()
         return
@@ -934,5 +923,3 @@ def subscriber_portal_page(db=None):
     # 7) الشاشة الرئيسية
     main_screen(db_path, sub)
     footer()
-
-
