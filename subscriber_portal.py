@@ -37,7 +37,6 @@ def _save_session_token(db_path, subscriber_id, garage_id):
         expires = (datetime.now() + timedelta(days=30)).isoformat()
 
         with sqlite3.connect(db_path, timeout=30) as conn:
-            # ⭐ تأكد من وجود الجدول
             conn.execute('''CREATE TABLE IF NOT EXISTS subscriber_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 subscriber_id TEXT NOT NULL,
@@ -118,71 +117,9 @@ def _revoke_session_token(db_path, token):
     except Exception:
         pass
 
-def get_app_status_for_portal(db_path, sub):
-    """يرجع (status, days, msg) — نسخة للبوابة"""
-    if not sub:
-        return 'expired', 0, 'غير مسجل'
-
-    if sub.get('app_subscription_active'):
-        end = sub.get('app_subscription_end')
-        if end:
-            try:
-                end_dt = datetime.fromisoformat(str(end).replace('Z', '').split('.')[0])
-                if end_dt >= datetime.now():
-                    days = max(0, (end_dt - datetime.now()).days)
-                    return 'active', days, f'✅ اشتراك نشط — يتبقى {days} يوم'
-            except Exception:
-                pass
-
-    reg = sub.get('registration_date')
-    if reg:
-        try:
-            reg_dt = datetime.fromisoformat(str(reg).replace('Z', '').split('.')[0])
-            trial_days = 3
-            try:
-                r = _query_one(db_path,
-                    "SELECT value FROM parking_settings WHERE key='app_trial_days'")
-                if r and r.get('value'):
-                    trial_days = int(r['value'])
-            except Exception:
-                pass
-
-            trial_end = reg_dt + timedelta(days=trial_days)
-            if trial_end >= datetime.now():
-                days = max(0, (trial_end - datetime.now()).days)
-                return 'trial', days, f'🎁 فترة تجريبية — يتبقى {days} يوم'
-        except Exception:
-            pass
-
-    return 'expired', 0, '❌ انتهى الاشتراك'
-def _reset_to_subscriber_portal():
-    """⭐⭐⭐ يرجع لبوابة المشترك — يمسح الـ token ويسيب view=subscriber ⭐⭐⭐"""
-    st.query_params.clear()
-    st.query_params["view"] = "subscriber"
-
-
-def _logout_and_redirect():
-    """⭐ تسجيل خروج موحد — يحتفظ بـ view=subscriber"""
-    # إلغاء الـ token
-    try:
-        db_path = st.session_state.get('sub_portal_garage_db_path')
-        token = st.session_state.get('sub_portal_token')
-        if db_path and token:
-            _revoke_session_token(db_path, token)
-    except Exception:
-        pass
-
-    # مسح session_state
-    for k in list(st.session_state.keys()):
-        if k.startswith('sub_portal_'):
-            st.session_state.pop(k, None)
-
-    # امسح الـ token وسيب view=subscriber
-    _reset_to_subscriber_portal()
-
 
 # ============================================================
-#  SQLite helpers مباشرة
+#  ⭐⭐⭐ SQLite helpers مباشرة ⭐⭐⭐
 # ============================================================
 def _query_one(db_path, query, params=()):
     """يرجع صف واحد كـ dict"""
@@ -233,6 +170,8 @@ def _init_app_tables(db_path):
                 cur.execute("ALTER TABLE subscribers ADD COLUMN app_subscription_end TEXT")
             if 'garage_id' not in cols:
                 cur.execute("ALTER TABLE subscribers ADD COLUMN garage_id INTEGER DEFAULT 1")
+            if 'app_service_disabled' not in cols:
+                cur.execute("ALTER TABLE subscribers ADD COLUMN app_service_disabled INTEGER DEFAULT 0")
 
             # app_payments
             cur.execute('''CREATE TABLE IF NOT EXISTS app_payments (
@@ -267,9 +206,7 @@ def _init_app_tables(db_path):
 # ============================================================
 def get_all_garages_from_registry():
     try:
-        # ⭐ Railway Volume Support
         registry_path = '/data/garages_registry.db' if os.path.exists('/data') else 'garages_registry.db'
-
         if not os.path.exists(registry_path):
             return []
         return _query_all(
@@ -278,6 +215,105 @@ def get_all_garages_from_registry():
         )
     except Exception:
         return []
+
+
+# ============================================================
+#  ⭐⭐⭐ حالة اشتراك التطبيق ⭐⭐⭐
+# ============================================================
+def get_app_status_for_portal(db_path, sub):
+    """
+    يرجع (status, days, msg)
+    status: 'active' | 'trial' | 'expired' | 'disabled' | 'garage_free'
+    """
+    if not sub:
+        return 'expired', 0, 'غير مسجل'
+
+    # 1) الإدارة أوقفت الخدمة يدوياً؟
+    if sub.get('app_service_disabled'):
+        return 'disabled', 0, '⛔ الخدمة موقوفة من الإدارة'
+
+    # 2) الجراج معفى نهائياً؟
+    try:
+        r = _query_one(db_path, "SELECT value FROM parking_settings WHERE key='garage_free_forever'")
+        if r and r.get('value') == '1':
+            return 'garage_free', 999, '🎉 الخدمة مجانية لهذا الجراج'
+    except Exception:
+        pass
+
+    # 3) الجراج معفى لفترة محددة؟
+    try:
+        r = _query_one(db_path, "SELECT value FROM parking_settings WHERE key='garage_free_until'")
+        if r and r.get('value'):
+            free_until = datetime.fromisoformat(str(r['value']).replace('Z', '').split('.')[0])
+            if free_until >= datetime.now():
+                days = max(0, (free_until - datetime.now()).days)
+                return 'garage_free', days, f'🎉 مجاني للجراج — يتبقى {days} يوم'
+    except Exception:
+        pass
+
+    # 4) اشتراك مدفوع نشط؟
+    if sub.get('app_subscription_active'):
+        end = sub.get('app_subscription_end')
+        if end:
+            try:
+                end_dt = datetime.fromisoformat(str(end).replace('Z', '').split('.')[0])
+                if end_dt >= datetime.now():
+                    days = max(0, (end_dt - datetime.now()).days)
+                    return 'active', days, f'✅ اشتراك نشط — يتبقى {days} يوم'
+            except Exception:
+                pass
+
+    # 5) فترة تجريبية (لو مفعّلة)؟
+    try:
+        r = _query_one(db_path, "SELECT value FROM parking_settings WHERE key='trial_enabled'")
+        trial_enabled = (r and r.get('value') == '1') if r else True
+    except Exception:
+        trial_enabled = True
+
+    if trial_enabled:
+        reg = sub.get('registration_date')
+        if reg:
+            try:
+                reg_dt = datetime.fromisoformat(str(reg).replace('Z', '').split('.')[0])
+                trial_days = 3
+                try:
+                    r = _query_one(db_path, "SELECT value FROM parking_settings WHERE key='app_trial_days'")
+                    if r and r.get('value'):
+                        trial_days = int(r['value'])
+                except Exception:
+                    pass
+
+                trial_end = reg_dt + timedelta(days=trial_days)
+                if trial_end >= datetime.now():
+                    days = max(0, (trial_end - datetime.now()).days)
+                    return 'trial', days, f'🎁 فترة تجريبية — يتبقى {days} يوم'
+            except Exception:
+                pass
+
+    return 'expired', 0, '❌ انتهى الاشتراك'
+
+
+def _reset_to_subscriber_portal():
+    """يرجع لبوابة المشترك — يمسح الـ token ويسيب view=subscriber"""
+    st.query_params.clear()
+    st.query_params["view"] = "subscriber"
+
+
+def _logout_and_redirect():
+    """تسجيل خروج موحد — يحتفظ بـ view=subscriber"""
+    try:
+        db_path = st.session_state.get('sub_portal_garage_db_path')
+        token = st.session_state.get('sub_portal_token')
+        if db_path and token:
+            _revoke_session_token(db_path, token)
+    except Exception:
+        pass
+
+    for k in list(st.session_state.keys()):
+        if k.startswith('sub_portal_'):
+            st.session_state.pop(k, None)
+
+    _reset_to_subscriber_portal()
 
 
 # ============================================================
@@ -443,6 +479,7 @@ def get_subscriber_by_phone(db_path, phone):
         return None
     row.setdefault('app_subscription_active', 0)
     row.setdefault('app_subscription_end', None)
+    row.setdefault('app_service_disabled', 0)
     return row
 
 
@@ -461,8 +498,7 @@ def get_spot_location_text(db_path, spot_id):
         if len(parts) == 3:
             floor = int(parts[0])
             number = int(parts[2])
-            row = _query_one(db_path,
-                             "SELECT value FROM parking_settings WHERE key='garage_floor_names'")
+            row = _query_one(db_path, "SELECT value FROM parking_settings WHERE key='garage_floor_names'")
             if row and row.get('value'):
                 names = json.loads(row['value'])
                 fname = names.get(str(floor), f"الدور {floor}")
@@ -537,20 +573,17 @@ def login_screen():
                 if not sub:
                     st.error("❌ رقم التلفون غير مسجل في هذا الجراج")
                 else:
-                    # ⭐ توليد token وحفظه في DB
                     token = _save_session_token(db_path, sub['id'], garage_id)
 
                     if not token:
                         st.error("❌ فشل إنشاء جلسة")
                         return
 
-                    # ⭐ حفظ في session_state
                     st.session_state['sub_portal_logged_in'] = True
                     st.session_state['sub_portal_phone'] = phone.strip()
                     st.session_state['sub_portal_sub_id'] = sub['id']
                     st.session_state['sub_portal_token'] = token
 
-                    # ⭐⭐⭐ حط الـ token في الرابط ⭐⭐⭐
                     st.query_params["view"] = "subscriber"
                     st.query_params["token"] = token
 
@@ -592,7 +625,6 @@ def expired_screen(sub):
 def show_app_payments(db):
     st.markdown("## 📱 دفعات اشتراك التطبيق")
 
-    # ⭐ فلاتر البحث
     c1, c2, c3 = st.columns(3)
     with c1:
         f_name = st.text_input("👤 الاسم", key="pay_f_name")
@@ -606,7 +638,6 @@ def show_app_payments(db):
 
     for g in garages:
         try:
-            # فلتر الجراج
             if f_garage and f_garage.strip().lower() not in g['name'].lower():
                 continue
 
@@ -627,10 +658,8 @@ def show_app_payments(db):
                    ORDER BY ap.id DESC'''
             )
             for r in rows:
-                # فلتر الاسم
                 if f_name and f_name.strip().lower() not in (r.get('name') or '').lower():
                     continue
-                # فلتر التلفون
                 if f_phone and f_phone.strip() not in (r.get('phone') or ''):
                     continue
 
@@ -704,6 +733,69 @@ def show_app_payments(db):
                         st.rerun()
                     else:
                         st.error("❌ فشل")
+
+
+def app_payment_screen(db_path, sub):
+    """صفحة دفع اشتراك التطبيق"""
+
+    # ⭐ تحقق من الإيقاف اليدوي — أول حاجة
+    if sub.get('app_service_disabled'):
+        st.markdown("""
+        <div class="portal-header">
+            <div style="font-size: 55px;">⛔</div>
+            <h1>الخدمة موقوفة</h1>
+        </div>
+        <div class="status-expired">
+            ⛔ تم إيقاف خدمتك من إدارة النظام<br>
+            <span style="font-size: 13px;">تواصل مع الإدارة للاستفسار</span>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("← العودة", key="back_disabled"):
+            st.session_state.pop('show_payment_screen', None)
+            st.rerun()
+        return
+
+    # ⭐ جديد: لو الجراج معفى أو السعر صفر → مفيش دفع
+    fee = float(get_setting(db_path, 'app_fee', '10'))
+    free_forever = get_setting(db_path, 'garage_free_forever', '0') == '1'
+    if free_forever or fee <= 0:
+        st.markdown("""
+        <div class="portal-header">
+            <div style="font-size: 55px;">🎉</div>
+            <h1>الخدمة مجانية</h1>
+        </div>
+        <div class="status-ok">
+            🎉 خدمة التطبيق مجانية لهذا الجراج<br>
+            <span style="font-size: 13px;">يمكنك استخدام الخدمة مباشرة</span>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("← العودة", key="back_free"):
+            st.session_state.pop('show_payment_screen', None)
+            st.rerun()
+        return
+
+    garage_name = st.session_state.get('sub_portal_garage_name', '')
+    garage_id = st.session_state.get('sub_portal_garage_id', 1)
+
+    st.markdown(f"""
+    <div class="portal-header">
+        <div style="font-size: 48px;">📱</div>
+        <h1>اشتراك استخدام التطبيق</h1>
+        <p>🏢 {garage_name}</p>
+    </div>
+    <div class="sub-card">
+        <div class="name">👤 {sub.get('name', '')}</div>
+        <div class="car">🚗 {sub.get('car_number', '')}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ← احذف السطرين دول لأنك حسبتهم فوق خلاص
+    # fee = float(get_setting(db_path, 'app_fee', '10'))
+    instapay = get_setting(db_path, 'instapay_number', '')
+    vodafone = get_setting(db_path, 'vodafone_cash_number', '')
+
+    # ... باقي الكود زي ما هو
+
 def main_screen(db_path, sub):
     garage_name = st.session_state.get('sub_portal_garage_name', '')
 
@@ -717,9 +809,9 @@ def main_screen(db_path, sub):
     # ⭐ حالة اشتراك التطبيق
     app_status, app_days, app_msg = get_app_status_for_portal(db_path, sub)
 
-    # ⭐ بطاقة الحالة
-    if app_status == 'active':
+    if app_status in ('active', 'garage_free'):
         st.markdown(f'<div class="status-ok">📱 {app_msg}</div>', unsafe_allow_html=True)
+
     elif app_status == 'trial':
         st.markdown(f"""
         <div class="status-warning">
@@ -732,7 +824,18 @@ def main_screen(db_path, sub):
         if st.button("💳 ادفع الآن", use_container_width=True, key="pay_from_trial"):
             st.session_state['show_payment_screen'] = True
             st.rerun()
-    else:
+
+    elif app_status == 'disabled':
+        st.markdown(f"""
+        <div class="status-expired">
+            {app_msg}<br>
+            <span style="font-size: 12px; opacity: 0.9;">
+                تواصل مع الإدارة للاستفسار
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    else:  # expired
         st.markdown(f"""
         <div class="status-expired">
             {app_msg}<br>
@@ -777,7 +880,7 @@ def main_screen(db_path, sub):
     </div>
     """, unsafe_allow_html=True)
 
-    # ⭐ QR يظهر دايماً
+    # QR يظهر دايماً
     qr_data = sub['car_number']
     qr_b64 = generate_qr_base64(qr_data)
     if qr_b64:
@@ -801,84 +904,7 @@ def main_screen(db_path, sub):
         _logout_and_redirect()
         st.rerun()
 
-# ============================================================
-#  📱 صفحة دفعات التطبيق للسوبر أدمن
-# ============================================================
-def app_payment_screen(db_path, sub):
-    """صفحة دفع اشتراك التطبيق"""
-    garage_name = st.session_state.get('sub_portal_garage_name', '')
-    garage_id = st.session_state.get('sub_portal_garage_id', 1)
 
-    st.markdown(f"""
-    <div class="portal-header">
-        <div style="font-size: 48px;">📱</div>
-        <h1>اشتراك استخدام التطبيق</h1>
-        <p>🏢 {garage_name}</p>
-    </div>
-    <div class="sub-card">
-        <div class="name">👤 {sub.get('name', '')}</div>
-        <div class="car">🚗 {sub.get('car_number', '')}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ⭐ قراءة الإعدادات
-    fee = float(get_setting(db_path, 'app_fee', '10'))
-    instapay = get_setting(db_path, 'instapay_number', '')
-    vodafone = get_setting(db_path, 'vodafone_cash_number', '')
-
-    st.markdown(f"""
-    <div class="pay-box">
-        <h2>💰 المطلوب دفعه شهرياً</h2>
-        <div class="amount">{fee:.0f} جنيه</div>
-        <div style="text-align: right; font-weight: bold;
-                    color: #667eea; margin: 12px 0;">
-            📌 طرق التحويل المتاحة:
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    if instapay:
-        st.markdown(f"""
-        <div class="pay-method">
-            <div class="label">💳 InstaPay</div>
-            <div class="value">{instapay}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    if vodafone:
-        st.markdown(f"""
-        <div class="pay-method">
-            <div class="label">📱 Vodafone Cash</div>
-            <div class="value">{vodafone}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with st.form("app_pay_form"):
-        st.markdown("### 📝 بيانات التحويل")
-        method = st.selectbox("🔄 طريقة الدفع", ["InstaPay", "Vodafone Cash"])
-        ref = st.text_input("🔢 رقم المرجع / آخر 4 أرقام")
-        notes = st.text_area("📝 ملاحظات (اختياري)", height=70)
-
-        if st.form_submit_button("✅ إرسال للمراجعة", use_container_width=True):
-            if not ref.strip():
-                st.error("❌ أدخل رقم المرجع")
-            else:
-                ok = _execute(
-                    db_path,
-                    "INSERT INTO app_payments "
-                    "(subscriber_id, garage_id, amount, method, reference_number, notes, status) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 'pending')",
-                    (sub['id'], garage_id, fee, method, ref.strip(), notes.strip())
-                )
-                if ok:
-                    st.success("✅ تم إرسال طلبك")
-                    st.info("⏳ سيتم مراجعة التحويل خلال دقائق")
-                else:
-                    st.error("❌ فشل الإرسال")
-
-    if st.button("🚪 تسجيل الخروج", key="logout_payment"):
-        _logout_and_redirect()
-        st.rerun()
 # ============================================================
 #  نقطة الدخول
 # ============================================================
@@ -886,10 +912,8 @@ def subscriber_portal_page(db=None):
     """db parameter موجود للتوافق فقط — لا يُستخدم"""
     inject_mobile_css()
 
-    # ⭐⭐⭐ قراءة الـ token من الرابط ⭐⭐⭐
     token = st.query_params.get("token")
 
-    # ⭐ محاولة استرجاع الجلسة من الـ token
     if not st.session_state.get('sub_portal_logged_in') and token:
         try:
             garages = get_all_garages_from_registry()

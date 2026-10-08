@@ -405,12 +405,35 @@ def set_system_expiry(db, expiry_date):
 def get_subscriber_app_status(db, sub):
     """
     يرجع (status, days_remaining, msg)
-    status: 'active' | 'trial' | 'expired'
+    status: 'active' | 'trial' | 'expired' | 'disabled' | 'garage_free'
     """
     if not sub:
         return 'expired', 0, 'غير مسجل'
 
-    # 1️⃣ اشتراك مدفوع نشط؟
+    # ⭐ 1) الإدارة أوقفت الخدمة يدوياً؟
+    if sub.get('app_service_disabled'):
+        return 'disabled', 0, '⛔ الخدمة موقوفة من الإدارة'
+
+    # ⭐ 2) الجراج معفى نهائياً؟
+    try:
+        r = db.execute_query("SELECT value FROM parking_settings WHERE key='garage_free_forever'", fetch=True)
+        if r and r[0]['value'] == '1':
+            return 'garage_free', 999, '🎉 الخدمة مجانية لهذا الجراج'
+    except Exception:
+        pass
+
+    # ⭐ 3) الجراج معفى لفترة محددة؟
+    try:
+        r = db.execute_query("SELECT value FROM parking_settings WHERE key='garage_free_until'", fetch=True)
+        if r and r[0]['value']:
+            free_until = datetime.fromisoformat(str(r[0]['value']).replace('Z', '').split('.')[0])
+            if free_until >= datetime.now():
+                days = max(0, (free_until - datetime.now()).days)
+                return 'garage_free', days, f'🎉 مجاني للجراج — يتبقى {days} يوم'
+    except Exception:
+        pass
+
+    # 4) اشتراك مدفوع نشط؟
     if sub.get('app_subscription_active'):
         end = sub.get('app_subscription_end')
         if end:
@@ -422,32 +445,37 @@ def get_subscriber_app_status(db, sub):
             except Exception:
                 pass
 
-    # 2️⃣ فترة تجريبية؟
-    reg = sub.get('registration_date')
-    if reg:
-        try:
-            reg_dt = datetime.fromisoformat(str(reg).replace('Z', '').split('.')[0])
-            trial_days = 3
+    # 5) فترة تجريبية (لو مفعّلة)؟
+    try:
+        r = db.execute_query("SELECT value FROM parking_settings WHERE key='trial_enabled'", fetch=True)
+        trial_enabled = (r and r[0]['value'] == '1') if r else True
+    except Exception:
+        trial_enabled = True
+
+    if trial_enabled:
+        reg = sub.get('registration_date')
+        if reg:
             try:
-                r = db.execute_query(
-                    "SELECT value FROM parking_settings WHERE key='app_trial_days'",
-                    fetch=True
-                )
-                if r and r[0]['value']:
-                    trial_days = int(r[0]['value'])
+                reg_dt = datetime.fromisoformat(str(reg).replace('Z', '').split('.')[0])
+                trial_days = 3
+                try:
+                    r = db.execute_query(
+                        "SELECT value FROM parking_settings WHERE key='app_trial_days'",
+                        fetch=True
+                    )
+                    if r and r[0]['value']:
+                        trial_days = int(r[0]['value'])
+                except Exception:
+                    pass
+
+                trial_end = reg_dt + timedelta(days=trial_days)
+                if trial_end >= datetime.now():
+                    days = max(0, (trial_end - datetime.now()).days)
+                    return 'trial', days, f'🎁 فترة تجريبية — يتبقى {days} يوم'
             except Exception:
                 pass
 
-            trial_end = reg_dt + timedelta(days=trial_days)
-            if trial_end >= datetime.now():
-                days = max(0, (trial_end - datetime.now()).days)
-                return 'trial', days, f'🎁 فترة تجريبية — يتبقى {days} يوم'
-        except Exception:
-            pass
-
     return 'expired', 0, '❌ انتهى الاشتراك'
-
-
 def is_subscriber_app_active(sub):
     """يبقى للتوافق مع الكود القديم — لكن الأفضل استخدام get_subscriber_app_status"""
     if not sub:
@@ -915,7 +943,6 @@ class Database:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_subscriber ON subscriber_sessions(subscriber_id, is_active)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_device ON subscriber_sessions(device_id)')
 
-                # Default settings
                 defaults = {'first_hour_price': '20', 'second_hour_price': '10', 'free_minutes': '10',
                             'printer_type': 'epson_tm', 'printer_port': 'USB001', 'paper_width': '80',
                             'last_movement_number': '0', 'last_visitor_ticket_number': '0',
@@ -924,8 +951,11 @@ class Database:
                             'garage_name': DEFAULT_GARAGE_NAME,
                             'app_fee': '10',
                             'app_trial_days': '3',
-                             'instapay_number': INSTAPAY_NUMBER,
-                            'vodafone_cash_number': ''}
+                            'instapay_number': INSTAPAY_NUMBER,
+                            'vodafone_cash_number': '',
+                            'trial_enabled': '1',              # ⭐ جديد — تشغيل/إيقاف التجربة
+                            'garage_free_forever': '0',        # ⭐ جديد — الجراج معفى نهائياً
+                            'garage_free_until': ''}           # ⭐ جديد — معفى حتى تاريخ
                 for k, v in defaults.items():
                     cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)', (k, v))
 
@@ -950,7 +980,8 @@ class Database:
                     ('shifts', 'subscriber_revenue', 'REAL DEFAULT 0'),
                     ('subscribers', 'app_subscription_active', 'INTEGER DEFAULT 0'),
                     ('subscribers', 'app_subscription_end', 'TEXT'),
-                    ('subscribers', 'garage_id', 'INTEGER DEFAULT 1')
+                    ('subscribers', 'garage_id', 'INTEGER DEFAULT 1'),
+                    ('subscribers', 'app_service_disabled', 'INTEGER DEFAULT 0')   # ⭐ جديد
                 ]:
                     cursor.execute(f"PRAGMA table_info({table})")
                     cols = [c[1] for c in cursor.fetchall()]
@@ -1871,7 +1902,6 @@ class SubscriberAttendanceManager:
 
     def record_entry(self, sid):
         try:
-            # ⭐ فحص حالة اشتراك التطبيق (active / trial / expired)
             sub_row = self.db.execute_query(
                 "SELECT * FROM subscribers WHERE id=?",
                 (sid,), fetch=True
@@ -1882,11 +1912,11 @@ class SubscriberAttendanceManager:
             sub_dict = dict(sub_row[0])
             status, days, msg = get_subscriber_app_status(self.db, sub_dict)
 
-            if status == 'expired':
-                app_log("warning", f"محاولة دخول مشترك منتهي: {sid} — {msg}")
+            # ⭐ رفض الحالتين: disabled و expired
+            if status in ('expired', 'disabled'):
+                app_log("warning", f"محاولة دخول مرفوضة: {sid} — {msg}")
                 return False
 
-            # ✅ active أو trial → يسمح بالدخول
             if self.db.execute_query(
                 "SELECT id FROM subscriber_attendance WHERE subscriber_id=? AND status='inside'",
                 (sid,), fetch=True
@@ -2243,7 +2273,6 @@ def _render_restore_db(db, manager):
 def _render_app_fee_config(db):
     st.markdown("### 💰 سعر خدمة التطبيق لهذا الجراج")
 
-    # ⭐ قراءة الإعدادات الحالية
     def _get_setting(key, default=''):
         r = db.execute_query(
             "SELECT value FROM parking_settings WHERE key=?",
@@ -2255,54 +2284,60 @@ def _render_app_fee_config(db):
     current_trial = _get_setting('app_trial_days', '3')
     current_instapay = _get_setting('instapay_number', '')
     current_vodafone = _get_setting('vodafone_cash_number', '')
+    trial_enabled = _get_setting('trial_enabled', '1') == '1'
+    free_forever = _get_setting('garage_free_forever', '0') == '1'
+    free_until_str = _get_setting('garage_free_until', '')
 
     st.info(f"""
     ⚙️ **الإعدادات الحالية:**
-    - 💵 سعر الاشتراك: **{current_fee} ج/شهر**
-    - 🎁 أيام تجريبية: **{current_trial} يوم**
+    - 💵 السعر: **{current_fee} ج/شهر**
+    - 🎁 تجربة: **{current_trial} يوم** ({'✅' if trial_enabled else '⛔'})
+    - 🎉 إعفاء الجراج: {'✅ معفى نهائياً' if free_forever else (f'✅ حتى {free_until_str[:10]}' if free_until_str else '❌ لا يوجد')}
     """)
 
     with st.form("app_fee_form"):
         c1, c2 = st.columns(2)
         with c1:
-            new_fee = st.number_input(
-                "💵 السعر الشهري (جنيه)",
-                min_value=0.0,
-                value=float(current_fee),
-                step=5.0,
-                key="fee_input"
-            )
+            new_fee = st.number_input("💵 السعر الشهري", min_value=0.0,
+                                      value=float(current_fee), step=5.0, key="fee_input")
         with c2:
-            new_trial = st.number_input(
-                "🎁 الأيام التجريبية للمشترك الجديد",
-                min_value=0,
-                max_value=90,
-                value=int(current_trial),
-                step=1,
-                key="trial_input"
-            )
+            new_trial = st.number_input("🎁 أيام تجريبية", min_value=0, max_value=90,
+                                        value=int(current_trial), step=1, key="trial_input")
+
+        st.markdown("---")
+        new_trial_enabled = st.checkbox("✅ تفعيل الفترة التجريبية",
+                                        value=trial_enabled, key="trial_enabled_input")
 
         c1, c2 = st.columns(2)
         with c1:
-            instapay = st.text_input(
-                "💳 رقم InstaPay",
-                value=current_instapay,
-                key="instapay_input"
-            )
+            new_free_forever = st.checkbox("🎉 الجراج معفى نهائياً",
+                                           value=free_forever, key="free_forever_input")
         with c2:
-            vodafone = st.text_input(
-                "📱 رقم Vodafone Cash",
-                value=current_vodafone,
-                key="vodafone_input"
-            )
+            try:
+                _def_date = datetime.fromisoformat(free_until_str).date() if free_until_str else datetime.now().date()
+            except Exception:
+                _def_date = datetime.now().date()
+            free_until_date = st.date_input("📅 أو معفى حتى:", value=_def_date, key="free_until_input")
+            use_free_until = st.checkbox("استخدام التاريخ",
+                                         value=bool(free_until_str and not free_forever),
+                                         key="use_free_until")
 
-        if st.form_submit_button("💾 حفظ الإعدادات",
-                                  use_container_width=True, type="primary"):
+        st.markdown("---")
+        c1, c2 = st.columns(2)
+        with c1:
+            instapay = st.text_input("💳 InstaPay", value=current_instapay, key="instapay_input")
+        with c2:
+            vodafone = st.text_input("📱 Vodafone Cash", value=current_vodafone, key="vodafone_input")
+
+        if st.form_submit_button("💾 حفظ", use_container_width=True, type="primary"):
             updates = {
                 'app_fee': str(new_fee),
                 'app_trial_days': str(new_trial),
                 'instapay_number': instapay.strip(),
                 'vodafone_cash_number': vodafone.strip(),
+                'trial_enabled': '1' if new_trial_enabled else '0',
+                'garage_free_forever': '1' if new_free_forever else '0',
+                'garage_free_until': free_until_date.isoformat() if (use_free_until and not new_free_forever) else '',
             }
             for k, v in updates.items():
                 db.execute_query(
@@ -2857,9 +2892,9 @@ def show_garage_view(manager, visitor_manager):
     goto_floor = st.session_state.pop('_goto_floor', None)
     goto_spot = st.session_state.pop('_goto_spot', None)
 
-    with st.expander("🔍 البحث المتكامل (زوار ومشتركين)", expanded=False):
+    show_search = st.toggle("🔍 البحث المتكامل (زوار ومشتركين)", key="garage_show_search")
+    if show_search:
         render_unified_search(manager, visitor_manager, key_prefix="garage")
-
     st.markdown("---")
     floors = sorted(manager.structure.keys())
     if not floors:
@@ -3330,26 +3365,32 @@ def manage_subscribers(manager):
                         st.write(f"**نهاية:** {row[9][:10] if row[9] else ''}")
                         if row[13]:
                             st.write(f"**📍 المكان:** {get_spot_location(row[13])}")
-                    nb = 7 if is_admin else 3
+                    # ⭐ أزرار التحكم في المشترك
+                    nb = 8 if ur == 'super_admin' else (7 if is_admin else 3)
                     bcols = st.columns(nb)
+
                     with bcols[0]:
                         if st.button("🔄 تجديد", key=f"rn_{row[0]}"):
                             st.session_state['renew_subscriber_id'] = row[0]
                             st.rerun()
+
                     if is_admin:
                         with bcols[1]:
                             if st.button("✏️ تعديل", key=f"ed_{row[0]}"):
                                 st.session_state['edit_subscriber'] = row[0]
                                 st.rerun()
+
                         with bcols[2]:
                             if st.button("🗑️ حذف", key=f"dl_{row[0]}"):
                                 if manager.delete_subscriber(row[0]):
                                     st.success("✅")
                                     st.rerun()
+
                         with bcols[3]:
                             if st.button("🎫 كارت", key=f"cd_{row[0]}"):
                                 st.session_state['show_subscriber_card'] = row[0]
                                 st.rerun()
+
                         with bcols[4]:
                             if st.button("❌ إلغاء مكان", key=f"un_{row[0]}"):
                                 if manager.unassign_spot(row[0]):
@@ -3357,18 +3398,34 @@ def manage_subscribers(manager):
                                     st.rerun()
                                 else:
                                     st.warning("لا يوجد مكان")
+
                         with bcols[5]:
                             if st.button("🔀 تغيير مكان", key=f"ch_{row[0]}"):
                                 st.session_state['change_spot_sid'] = row[0]
                                 st.rerun()
+
                         with bcols[6]:
                             if st.button("🏷️ باركود", key=f"bc_{row[0]}"):
                                 s = manager.get_subscriber(row[0])
                                 if s:
                                     components.html(_gen_barcode_html(s), height=400, scrolling=False)
-        else:
-            st.info("لا يوجد مشتركين")
 
+                        # ⭐ زر إيقاف/تشغيل الخدمة (سوبر أدمن فقط)
+                        if ur == 'super_admin':
+                            with bcols[7]:
+                                sub_data = manager.get_subscriber(row[0])
+                                is_disabled = sub_data.get('app_service_disabled', 0) if sub_data else 0
+                                btn_label = "▶️ تشغيل" if is_disabled else "⛔ إيقاف"
+                                if st.button(btn_label, key=f"disable_{row[0]}"):
+                                    new_val = 0 if is_disabled else 1
+                                    manager.db.execute_query(
+                                        "UPDATE subscribers SET app_service_disabled=? WHERE id=?",
+                                        (new_val, row[0]), commit=True
+                                    )
+                                    clear_all_caches()
+                                    st.success("✅ تم التحديث")
+                                    time.sleep(0.3)
+                                    st.rerun()
     with tabs[2]:
         subs = manager.get_all_subscribers()
         if subs:
@@ -3459,9 +3516,8 @@ def entry_page(manager, visitor_manager, attendance_manager):
         st.info("👉 اذهب إلى القائمة الجانبية واضغط '🟢 فتح وردية'.")
         return
 
-    with st.expander("🔍 بحث متكامل قبل الدخول", expanded=False):
+    if st.toggle("🔍 بحث متكامل قبل الدخول", key="entry_show_search"):
         render_unified_search(manager, visitor_manager, key_prefix="entry")
-
     st.markdown("---")
     tab1, tab2 = st.tabs(["🚗 دخول زائر", "👤 دخول مشترك"])
 
@@ -3603,9 +3659,8 @@ def exit_page(manager, visitor_manager, attendance_manager):
         st.error("⚠️ **يجب فتح وردية أولاً!**")
         return
 
-    with st.expander("🔍 بحث متكامل قبل الخروج", expanded=False):
+    if st.toggle("🔍 بحث متكامل قبل الخروج", key="exit_show_search"):
         render_unified_search(manager, visitor_manager, key_prefix="exit")
-
     st.markdown("---")
     tab1, tab2 = st.tabs(["🚗 خروج زائر", "👤 خروج مشترك"])
 
