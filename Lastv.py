@@ -3,7 +3,6 @@
 # النسخة النهائية: Multi-Garage + Railway Volume + Session Security
 # المطور: مهندس أحمد شعبان — 01095387792
 # ===================================================================
-
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -23,6 +22,15 @@ import qrcode
 from io import BytesIO
 import base64
 from PIL import Image
+
+# ⭐ تحميل .env — ضيف السطرين دول
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# باقي الكود زي ما هو...
 
 try:
     import barcode

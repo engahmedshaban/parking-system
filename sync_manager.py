@@ -4,15 +4,24 @@ import json
 import os
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import contextmanager
 
+
+# ⭐ تحميل المتغيرات من .env — ضيف السطرين دول
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 # ============ الإعدادات ============
-SYNC_MODE = os.environ.get('SYNC_MODE', 'local')  # local | cloud
+SYNC_MODE = os.environ.get('SYNC_MODE', 'local')
 LOCAL_DB = os.environ.get('LOCAL_DB', 'garage.db')
 DEVICE_ID = os.environ.get('DEVICE_ID', 'garage-pc-1')
-SYNC_INTERVAL = int(os.environ.get('SYNC_INTERVAL', '300'))  # 5 دقائق
+SYNC_INTERVAL = int(os.environ.get('SYNC_INTERVAL', '300'))
 
+GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
+GIST_ID = os.environ.get('GIST_ID', '')
 # GitHub Gist كقناة نقل
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
 GIST_ID = os.environ.get('GIST_ID', '')
