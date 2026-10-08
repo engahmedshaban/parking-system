@@ -1267,7 +1267,7 @@ class Database:
                     cursor.execute('INSERT OR IGNORE INTO users (username, password, role, full_name) VALUES (?, ?, ?, ?)',
                                    (uname, hashed, role, name))
 
-                # Migration: add missing columns
+                # ⭐ Migration: Sync Support
                 for table, col, typ in [
                     ('visitors', 'spot_id', 'TEXT'), ('visitors', 'movement_number', 'INTEGER'),
                     ('visitors', 'phone', 'TEXT'), ('history', 'movement_number', 'INTEGER'),
@@ -1278,13 +1278,29 @@ class Database:
                     ('subscribers', 'app_subscription_active', 'INTEGER DEFAULT 0'),
                     ('subscribers', 'app_subscription_end', 'TEXT'),
                     ('subscribers', 'garage_id', 'INTEGER DEFAULT 1'),
-                    ('subscribers', 'app_service_disabled', 'INTEGER DEFAULT 0')   # ⭐ جديد
+                    ('subscribers', 'app_service_disabled', 'INTEGER DEFAULT 0'),
+                    ('subscribers', 'updated_at', 'TEXT'),      # ⭐ Sync
+                    ('visitors', 'updated_at', 'TEXT'),          # ⭐ Sync
+                    ('spots', 'updated_at', 'TEXT'),             # ⭐ Sync
                 ]:
                     cursor.execute(f"PRAGMA table_info({table})")
                     cols = [c[1] for c in cursor.fetchall()]
                     if col not in cols:
                         cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
+                # ⭐ جدول سجل المزامنة
+                cursor.execute('''CREATE TABLE IF NOT EXISTS sync_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    table_name TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    data TEXT,
+                    timestamp TEXT NOT NULL,
+                    device_id TEXT,
+                    synced INTEGER DEFAULT 0
+                )''')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_synced ON sync_log(synced)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_time ON sync_log(timestamp)')
                 existing = self.execute_query("SELECT value FROM parking_settings WHERE key='garage_structure'", fetch=True)
                 if not existing:
                     structure_serializable = {str(f): {str(l): v for l, v in levels.items()}
@@ -1535,8 +1551,46 @@ def update_parking_settings(db, settings):
         return True
     except Exception:
         return False
+# ===================================================================
+# ⭐⭐⭐ Sync Support ⭐⭐⭐
+# ===================================================================
+SYNC_MODE = os.environ.get('SYNC_MODE', 'local')
+DEVICE_ID = os.environ.get('DEVICE_ID', 'garage-pc-1')
 
 
+def log_change(db, table, record_id, operation, data=None):
+    """يسجل تغيير في sync_log للمزامنة"""
+    try:
+        db.execute_query(
+            "INSERT INTO sync_log (table_name, record_id, operation, data, timestamp, device_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (table, str(record_id), operation,
+             json.dumps(data, ensure_ascii=False, default=str) if data else None,
+             datetime.now().isoformat(), DEVICE_ID),
+            commit=True
+        )
+    except Exception as e:
+        app_log("error", f"log_change: {e}")
+# ===================================================================
+# ⭐⭐⭐ Sync Support ⭐⭐⭐
+# ===================================================================
+SYNC_MODE = os.environ.get('SYNC_MODE', 'local')  # 'local' أو 'cloud'
+DEVICE_ID = os.environ.get('DEVICE_ID', 'garage-pc-1')
+
+
+def log_change(db, table, record_id, operation, data=None):
+    """يسجل تغيير في sync_log للمزامنة"""
+    try:
+        db.execute_query(
+            "INSERT INTO sync_log (table_name, record_id, operation, data, timestamp, device_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (table, str(record_id), operation,
+             json.dumps(data, ensure_ascii=False, default=str) if data else None,
+             datetime.now().isoformat(), DEVICE_ID),
+            commit=True
+        )
+    except Exception as e:
+        app_log("error", f"log_change: {e}")
 # ===================================================================
 # ⭐⭐⭐ VisitorManager ⭐⭐⭐
 # ===================================================================
@@ -1586,11 +1640,26 @@ class VisitorManager:
                 'INSERT INTO history (type, subscriber_id, spot_id, details, date, movement_number) VALUES (?, ?, ?, ?, ?, ?)',
                 ('visitor_entry', None, spot_id, f"دخول زائر - {ticket} - {phone or 'بدون'}", now, mv), commit=True)
             clear_all_caches()
+            log_change(self.db, 'visitors', ticket, 'insert', {
+                'ticket_number': ticket,
+                'entry_time': now,
+                'vehicle_number': vehicle_number,
+                'vehicle_type': vehicle_type,
+                'status': 'inside',
+                'spot_id': spot_id,
+                'movement_number': mv,
+                'phone': phone,
+                'updated_at': now,
+            })
+            if spot_id:
+                log_change(self.db, 'spots', spot_id, 'update', {
+                    'id': spot_id, 'is_occupied': 1,
+                    'status': 'occupied', 'updated_at': now
+                })
             return ticket, mv
         except Exception as e:
             app_log("error", f"فشل تسجيل دخول زائر: {e}")
             return None, None
-
     def calculate_amount(self, duration, settings):
         first = float(settings.get('first_hour_price', 20))
         second = float(settings.get('second_hour_price', 10))
@@ -1675,6 +1744,25 @@ class VisitorManager:
                     (f"FIN_{datetime.now().strftime('%Y%m%d%H%M%S%f')}", None, 'زائر', amount, 'مدفوع',
                      f"رسوم زائر - {ticket}", now, shift_id), commit=True)
             clear_all_caches()
+            log_change(self.db, 'visitors', ticket, 'update', {
+                'ticket_number': ticket,
+                'exit_time': now,
+                'status': 'cancelled' if is_free else 'outside',
+                'amount': amount,
+                'payment_status': 'free' if is_free else 'paid',
+                'duration_minutes': duration,
+                'updated_at': now,
+            })
+            if row['spot_id']:
+                spot_info = self.db.execute_query('SELECT subscriber_id FROM spots WHERE id=?', (row['spot_id'],), fetch=True)
+                owner_sub = spot_info[0]['subscriber_id'] if spot_info else None
+                log_change(self.db, 'spots', row['spot_id'], 'update', {
+                    'id': row['spot_id'],
+                    'is_occupied': 0,
+                    'subscriber_id': owner_sub if owner_sub else None,
+                    'status': 'subscriber_out' if owner_sub else 'available',
+                    'updated_at': now,
+                })
             return {'ticket_number': ticket, 'entry_time': entry_time, 'exit_time': exit_time,
                     'duration': duration, 'amount': amount, 'vehicle_number': row['vehicle_number'],
                     'spot_id': row['spot_id'], 'movement_number': mv, 'phone': row.get('phone', ''),
@@ -1682,7 +1770,6 @@ class VisitorManager:
         except Exception as e:
             app_log("error", f"فشل خروج زائر: {e}")
             return None
-
     def get_visitor_by_ticket(self, ticket):
         result = self.db.execute_query('SELECT * FROM visitors WHERE ticket_number=?', (ticket,), fetch=True)
         return dict(result[0]) if result else None
@@ -1943,6 +2030,16 @@ class GarageManager:
                 cursor.execute('INSERT INTO history (type, subscriber_id, spot_id, details, date) VALUES (?, ?, ?, ?, ?)',
                                ('add_subscriber', sid, None, f"إضافة مشترك: {data['name']}", now))
             clear_all_caches()
+            log_change(self.db, 'subscribers', sid, 'insert', {
+                'id': sid, 'name': data['name'], 'workplace': data.get('workplace', ''),
+                'car_number': data['car_number'], 'car_type': data.get('car_type', ''),
+                'car_color': data.get('car_color', ''), 'phone': data['phone'],
+                'subscription_type': data['subscription_type'],
+                'subscription_start': data.get('subscription_start', now),
+                'subscription_end': data.get('subscription_end'),
+                'status': 'active', 'registration_date': now,
+                'updated_at': now,
+            })
             return sid
         except Exception as e:
             app_log("error", f"فشل إضافة مشترك: {e}")
@@ -1956,14 +2053,24 @@ class GarageManager:
             sub = self.get_subscriber(sid)
             if sub and sub.get('spot_id'):
                 return False
+            now_ts = datetime.now().isoformat()
             with self.db.get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("UPDATE spots SET is_occupied=1, subscriber_id=?, status='occupied' WHERE id=?", (sid, spot_id))
+                cursor.execute("UPDATE spots SET is_occupied=1, subscriber_id=?, status='occupied' WHERE id=?",
+                               (sid, spot_id))
                 cursor.execute('UPDATE subscribers SET spot_id=?, assigned_date=? WHERE id=?',
-                               (spot_id, datetime.now().isoformat(), sid))
-                cursor.execute('INSERT INTO history (type, subscriber_id, spot_id, details, date) VALUES (?, ?, ?, ?, ?)',
-                               ('assign_spot', sid, spot_id, f"تخصيص مكان - {get_spot_location(spot_id)}", datetime.now().isoformat()))
+                               (spot_id, now_ts, sid))
+                cursor.execute(
+                    'INSERT INTO history (type, subscriber_id, spot_id, details, date) VALUES (?, ?, ?, ?, ?)',
+                    ('assign_spot', sid, spot_id, f"تخصيص مكان - {get_spot_location(spot_id)}", now_ts))
             clear_all_caches()
+            log_change(self.db, 'subscribers', sid, 'update', {
+                'id': sid, 'spot_id': spot_id, 'assigned_date': now_ts, 'updated_at': now_ts
+            })
+            log_change(self.db, 'spots', spot_id, 'update', {
+                'id': spot_id, 'subscriber_id': sid, 'is_occupied': 1,
+                'status': 'occupied', 'updated_at': now_ts
+            })
             return True
         except Exception:
             return False
@@ -1974,17 +2081,26 @@ class GarageManager:
             if not sub or not sub.get('spot_id'):
                 return False
             spot_id = sub['spot_id']
+            now_ts = datetime.now().isoformat()
             with self.db.get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("UPDATE spots SET is_occupied=0, subscriber_id=NULL, status='available' WHERE id=?", (spot_id,))
+                cursor.execute("UPDATE spots SET is_occupied=0, subscriber_id=NULL, status='available' WHERE id=?",
+                               (spot_id,))
                 cursor.execute('UPDATE subscribers SET spot_id=NULL, assigned_date=NULL WHERE id=?', (sid,))
-                cursor.execute('INSERT INTO history (type, subscriber_id, spot_id, details, date) VALUES (?, ?, ?, ?, ?)',
-                               ('unassign_spot', sid, spot_id, f"إلغاء تخصيص مكان {get_spot_location(spot_id)}", datetime.now().isoformat()))
+                cursor.execute(
+                    'INSERT INTO history (type, subscriber_id, spot_id, details, date) VALUES (?, ?, ?, ?, ?)',
+                    ('unassign_spot', sid, spot_id, f"إلغاء تخصيص مكان {get_spot_location(spot_id)}", now_ts))
             clear_all_caches()
+            log_change(self.db, 'subscribers', sid, 'update', {
+                'id': sid, 'spot_id': None, 'assigned_date': None, 'updated_at': now_ts
+            })
+            log_change(self.db, 'spots', spot_id, 'update', {
+                'id': spot_id, 'subscriber_id': None, 'is_occupied': 0,
+                'status': 'available', 'updated_at': now_ts
+            })
             return True
         except Exception:
             return False
-
     def change_spot(self, sid, new_spot_id):
         try:
             sub = self.get_subscriber(sid)
@@ -1994,22 +2110,33 @@ class GarageManager:
             if not new_spot or new_spot['status'] not in ('available',):
                 return False
             old_spot_id = sub.get('spot_id')
+            now_ts = datetime.now().isoformat()
             with self.db.get_connection() as conn:
                 cursor = conn.cursor()
                 if old_spot_id:
                     cursor.execute("UPDATE spots SET is_occupied=0, subscriber_id=NULL, status='available' WHERE id=?", (old_spot_id,))
                 cursor.execute("UPDATE spots SET is_occupied=1, subscriber_id=?, status='occupied' WHERE id=?", (sid, new_spot_id))
                 cursor.execute('UPDATE subscribers SET spot_id=?, assigned_date=? WHERE id=?',
-                               (new_spot_id, datetime.now().isoformat(), sid))
+                               (new_spot_id, now_ts, sid))
                 cursor.execute('INSERT INTO history (type, subscriber_id, spot_id, details, date) VALUES (?, ?, ?, ?, ?)',
                                ('change_spot', sid, new_spot_id,
-                                f"تغيير المكان إلى {get_spot_location(new_spot_id)}",
-                                datetime.now().isoformat()))
+                                f"تغيير المكان إلى {get_spot_location(new_spot_id)}", now_ts))
             clear_all_caches()
+            log_change(self.db, 'subscribers', sid, 'update', {
+                'id': sid, 'spot_id': new_spot_id, 'assigned_date': now_ts, 'updated_at': now_ts
+            })
+            if old_spot_id:
+                log_change(self.db, 'spots', old_spot_id, 'update', {
+                    'id': old_spot_id, 'subscriber_id': None, 'is_occupied': 0,
+                    'status': 'available', 'updated_at': now_ts
+                })
+            log_change(self.db, 'spots', new_spot_id, 'update', {
+                'id': new_spot_id, 'subscriber_id': sid, 'is_occupied': 1,
+                'status': 'occupied', 'updated_at': now_ts
+            })
             return True
         except Exception:
             return False
-
     def renew_subscription(self, sid, stype, fee, start=None, end=None):
         try:
             sub = self.get_subscriber(sid)
@@ -2020,6 +2147,7 @@ class GarageManager:
             if not end:
                 days = self.subscription_plans.get(stype, 30)
                 end = (datetime.now() + timedelta(days=days)).isoformat()
+            now_ts = datetime.now().isoformat()
             with self.db.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("UPDATE subscribers SET subscription_type=?, subscription_start=?, subscription_end=?, payment_amount=?, status='active' WHERE id=?",
@@ -2029,17 +2157,22 @@ class GarageManager:
                 if fee and fee > 0:
                     cursor.execute('INSERT INTO financial_records (id, subscriber_id, type, amount, status, description, date, shift_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                                    (f"FIN_{datetime.now().strftime('%Y%m%d%H%M%S%f')}", sid, f'تجديد {stype}',
-                                    fee, 'مدفوع', f'تجديد اشتراك {sub.get("name")}', datetime.now().isoformat(), shift_id))
+                                    fee, 'مدفوع', f'تجديد اشتراك {sub.get("name")}', now_ts, shift_id))
                 cursor.execute('INSERT INTO history (type, subscriber_id, spot_id, details, date) VALUES (?, ?, ?, ?, ?)',
-                               ('renew_subscription', sid, None, f"تجديد: {sub.get('name')}", datetime.now().isoformat()))
+                               ('renew_subscription', sid, None, f"تجديد: {sub.get('name')}", now_ts))
             clear_all_caches()
+            log_change(self.db, 'subscribers', sid, 'update', {
+                'id': sid, 'subscription_type': stype, 'subscription_start': start,
+                'subscription_end': end, 'payment_amount': fee, 'status': 'active',
+                'updated_at': now_ts
+            })
             return True
         except Exception:
             return False
-
     def update_subscriber(self, sid, data):
         try:
-            if self.db.execute_query('SELECT id FROM subscribers WHERE car_number=? AND id!=?', (data['car_number'], sid), fetch=True):
+            if self.db.execute_query('SELECT id FROM subscribers WHERE car_number=? AND id!=?',
+                                     (data['car_number'], sid), fetch=True):
                 return False
             with self.db.get_connection() as conn:
                 cursor = conn.cursor()
@@ -2052,9 +2185,25 @@ class GarageManager:
                                 data.get('car_color', ''), data['phone'], data['subscription_type'],
                                 data['subscription_start'], data['subscription_end'], data['payment_amount'],
                                 data.get('status', 'active'), sid))
-                cursor.execute('INSERT INTO history (type, subscriber_id, spot_id, details, date) VALUES (?, ?, ?, ?, ?)',
-                               ('update_subscriber', sid, None, f"تحديث: {data['name']}", datetime.now().isoformat()))
+                cursor.execute(
+                    'INSERT INTO history (type, subscriber_id, spot_id, details, date) VALUES (?, ?, ?, ?, ?)',
+                    ('update_subscriber', sid, None, f"تحديث: {data['name']}", datetime.now().isoformat()))
             clear_all_caches()
+            log_change(self.db, 'subscribers', sid, 'update', {
+                'id': sid,
+                'name': data['name'],
+                'workplace': data.get('workplace', ''),
+                'car_number': data['car_number'],
+                'car_type': data.get('car_type', ''),
+                'car_color': data.get('car_color', ''),
+                'phone': data['phone'],
+                'subscription_type': data['subscription_type'],
+                'subscription_start': data['subscription_start'],
+                'subscription_end': data['subscription_end'],
+                'payment_amount': data['payment_amount'],
+                'status': data.get('status', 'active'),
+                'updated_at': datetime.now().isoformat(),
+            })
             return True
         except Exception:
             return False
@@ -2068,15 +2217,18 @@ class GarageManager:
                 if r:
                     name, spot_id = r[0], r[1]
                     if spot_id:
-                        cursor.execute("UPDATE spots SET is_occupied=0, subscriber_id=NULL, status='available' WHERE id=?", (spot_id,))
+                        cursor.execute(
+                            "UPDATE spots SET is_occupied=0, subscriber_id=NULL, status='available' WHERE id=?",
+                            (spot_id,))
                     cursor.execute('DELETE FROM subscribers WHERE id=?', (sid,))
-                    cursor.execute('INSERT INTO history (type, subscriber_id, spot_id, details, date) VALUES (?, ?, ?, ?, ?)',
-                                   ('delete_subscriber', sid, None, f"حذف: {name}", datetime.now().isoformat()))
+                    cursor.execute(
+                        'INSERT INTO history (type, subscriber_id, spot_id, details, date) VALUES (?, ?, ?, ?, ?)',
+                        ('delete_subscriber', sid, None, f"حذف: {name}", datetime.now().isoformat()))
             clear_all_caches()
+            log_change(self.db, 'subscribers', sid, 'delete', None)
             return True
         except Exception:
             return False
-
     def get_expiring_subscribers(self, days=7):
         return get_cached_expiring_subscribers(self.db.db_path, days)
 
@@ -2209,7 +2361,6 @@ class SubscriberAttendanceManager:
             sub_dict = dict(sub_row[0])
             status, days, msg = get_subscriber_app_status(self.db, sub_dict)
 
-            # ⭐ رفض الحالتين: disabled و expired
             if status in ('expired', 'disabled'):
                 app_log("warning", f"محاولة دخول مرفوضة: {sid} — {msg}")
                 return False
@@ -2238,6 +2389,16 @@ class SubscriberAttendanceManager:
                 ('subscriber_entry', sid, None, details, now, mv), commit=True
             )
             clear_all_caches()
+            log_change(self.db, 'subscriber_attendance', sid, 'insert', {
+                'subscriber_id': sid,
+                'entry_time': now,
+                'status': 'inside',
+                'movement_number': mv,
+                'updated_at': now,
+            })
+            log_change(self.db, 'subscribers', sid, 'update', {
+                'id': sid, 'updated_at': now
+            })
             return True
         except Exception as e:
             app_log("error", f"record_entry: {e}")
@@ -2255,11 +2416,20 @@ class SubscriberAttendanceManager:
             self.db.execute_query('INSERT INTO history (type, subscriber_id, spot_id, details, date, movement_number) VALUES (?, ?, ?, ?, ?, ?)',
                                   ('subscriber_exit', sid, None, 'خروج مشترك', now, mv), commit=True)
             clear_all_caches()
+            log_change(self.db, 'subscriber_attendance', sid, 'update', {
+                'subscriber_id': sid,
+                'exit_time': now,
+                'status': 'outside',
+                'movement_number': mv,
+                'updated_at': now,
+            })
+            log_change(self.db, 'subscribers', sid, 'update', {
+                'id': sid, 'updated_at': now
+            })
             return True
         except Exception as e:
             app_log("error", f"record_exit: {e}")
             return False
-
     def get_current_status(self, sid):
         result = self.db.execute_query("SELECT * FROM subscriber_attendance WHERE subscriber_id=? AND status='inside'", (sid,), fetch=True)
         return result[0] if result else None
@@ -4699,6 +4869,36 @@ def main():
                         st.rerun()
 
         st.markdown("---")
+        # ⭐ قسم المزامنة
+        st.markdown("---")
+        st.markdown("### 🔄 المزامنة")
+
+        try:
+            from sync_manager import sync_now as _sync_now, get_sync_status as _get_sync_status
+            _status = _get_sync_status()
+
+            if _status.get('gist_configured'):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.metric("📤 معلق", _status.get('pending', 0))
+                with c2:
+                    st.metric("🆔 الجهاز", _status.get('device_id', '?')[:8])
+
+                if st.button("🔄 مزامنة الآن", use_container_width=True, key="sync_now_btn"):
+                    with st.spinner("جاري المزامنة..."):
+                        _r = _sync_now()
+                        if _r['pushed'] or _r['pulled']:
+                            st.success(f"✅ ↑{_r['pushed']} ↓{_r['pulled']}")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.info("لا يوجد تغييرات")
+            else:
+                st.caption("⚠️ Gist غير مُعدّ")
+        except ImportError:
+            st.caption("⚠️ sync_manager غير موجود")
+        except Exception as e:
+            st.caption(f"❌ {str(e)[:50]}")
         menu_items = []
 
         if ur == 'super_admin':
