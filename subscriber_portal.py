@@ -220,7 +220,7 @@ def _init_app_tables(db_path):
             # settings
             cur.execute("INSERT OR IGNORE INTO parking_settings (key, value) VALUES ('app_fee', '10')")
             cur.execute("INSERT OR IGNORE INTO parking_settings (key, value) VALUES ('instapay_number', 'ahmed.shaban@instapay')")
-            cur.execute("INSERT OR IGNORE INTO parking_settings (key, value) VALUES ('vodafone_cash_number', '01095387792')")
+            cur.execute("INSERT OR IGNORE INTO parking_settings (key, value) VALUES ('instapay_number', '01095387792')")
             conn.commit()
     except Exception:
         pass
@@ -571,7 +571,7 @@ def app_payment_screen(db_path, sub):
 
     fee = float(get_setting(db_path, 'app_fee', '10'))
     instapay = get_setting(db_path, 'instapay_number', '')
-    vodafone = get_setting(db_path, 'vodafone_cash_number', '')
+    vodafone = get_setting(db_path, 'instapay_number', '')
 
     st.markdown(f"""
     <div class="pay-box">
@@ -595,14 +595,14 @@ def app_payment_screen(db_path, sub):
     if vodafone:
         st.markdown(f"""
         <div class="pay-method">
-            <div class="label">📱 Vodafone Cash</div>
+            <div class="label">💳 InstaPay</div>
             <div class="value">{vodafone}</div>
         </div>
         """, unsafe_allow_html=True)
 
     with st.form("app_pay_form"):
         st.markdown("### 📝 بيانات التحويل")
-        method = st.selectbox("🔄 طريقة الدفع", ["InstaPay", "Vodafone Cash"])
+        method = st.selectbox("🔄 طريقة الدفع", ["InstaPay", "InstaPay"])
         ref = st.text_input("🔢 رقم المرجع / آخر 4 أرقام")
         notes = st.text_area("📝 ملاحظات (اختياري)", height=70)
 
