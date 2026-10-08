@@ -2064,13 +2064,13 @@ def locked_page(db):
 # ===================================================================
 def super_admin_page(db, manager):
     st.markdown("## 🔐 لوحة Super Admin")
-    t1, t2, t3, t4 = st.tabs([
+    t1, t2, t3, t4, t5 = st.tabs([
         "🏢 اسم الجراج والهيكل",
         "📅 صلاحية النظام",
         "💰 سعر الخدمة والتجربة",
-        "👨‍💻 معلومات المطور"
+        "👨‍💻 معلومات المطور",
+        "📁 استعادة DB"          # ⭐ جديد
     ])
-
     with t1:
         _render_garage_config(db, manager)
     with t2:
@@ -2079,6 +2079,8 @@ def super_admin_page(db, manager):
         _render_app_fee_config(db)
     with t4:
         _render_dev_info()
+    with t5:
+        _render_restore_db(db, manager)
 def _render_garage_config(db, manager):
     st.markdown("### 🏷️ اسم الجراج")
     current_name = db.get_garage_name()
@@ -2200,6 +2202,43 @@ def _render_garage_config(db, manager):
                 st.rerun()
             else:
                 st.error("❌ فشل الحفظ")
+def _render_restore_db(db, manager):
+    st.markdown("### 📁 استعادة قاعدة بيانات من ملف")
+    st.warning("⚠️ **تحذير:** هذا سيستبدل كل البيانات الحالية!")
+
+    uploaded = st.file_uploader("اختر ملف قاعدة البيانات (.db)", type=['db'])
+
+    if uploaded:
+        st.info(f"📦 حجم الملف: {uploaded.size / 1024:.1f} KB")
+
+        if st.button("🔥 استبدال قاعدة البيانات", type="primary"):
+            import shutil
+            db_path = db.db_path  # المسار الحالي
+
+            # نسخة احتياطية
+            backup_path = db_path + ".backup"
+            try:
+                shutil.copy2(db_path, backup_path)
+                st.info(f"✅ تم إنشاء نسخة احتياطية: {backup_path}")
+            except Exception as e:
+                st.warning(f"⚠️ فشل النسخ الاحتياطي: {e}")
+
+            # اكتب الملف الجديد
+            try:
+                with open(db_path, 'wb') as f:
+                    f.write(uploaded.getbuffer())
+
+                # امسح الـ wal / shm
+                for ext in ['-wal', '-shm']:
+                    p = db_path + ext
+                    if os.path.exists(p):
+                        os.remove(p)
+
+                st.success("✅ تم استبدال قاعدة البيانات!")
+                st.info("🔄 أعد تشغيل التطبيق على Railway لتطبيق التغييرات")
+                time.sleep(2)
+            except Exception as e:
+                st.error(f"❌ فشل: {e}")
 
 def _render_app_fee_config(db):
     st.markdown("### 💰 سعر خدمة التطبيق لهذا الجراج")
