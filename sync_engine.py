@@ -115,28 +115,30 @@ def _dump_table(conn, table):
         return {}
 
 
-def take_snapshot():
-    """snapshot كامل"""
+def take_snapshot(db_path=None):
+    """snapshot كامل للـ DB المحدد"""
+    db_path = db_path or get_local_db()
     snap = {
         'device_id': DEVICE_ID,
         'timestamp': datetime.now().isoformat(),
+        'db_path': db_path,
         'dbs': {'main': {}, 'registry': {}},
     }
 
-    if os.path.exists(LOCAL_DB):
-        with sqlite3.connect(LOCAL_DB, timeout=30) as conn:
+    if db_path and os.path.exists(db_path):
+        with sqlite3.connect(db_path, timeout=30) as conn:
             for table in SYNC_TABLES:
                 if table == 'garages':
                     continue
                 snap['dbs']['main'][table] = _dump_table(conn, table)
 
-    if os.path.exists(REGISTRY_DB):
-        with sqlite3.connect(REGISTRY_DB, timeout=30) as conn:
+    # الـ registry دايمًا نقرأه من مكانه الأساسي
+    reg = get_registry_db()
+    if os.path.exists(reg):
+        with sqlite3.connect(reg, timeout=30) as conn:
             snap['dbs']['registry']['garages'] = _dump_table(conn, 'garages')
 
     return snap
-
-
 def _apply_table(conn, table, rows):
     """يطبق صفوف على جدول (last-write-wins بالـ updated_at)"""
     if not rows:
@@ -191,17 +193,18 @@ def _apply_table(conn, table, rows):
     return applied, skipped, errors
 
 
-def apply_snapshot(snap):
-    """يطبق snapshot خارجي"""
+def apply_snapshot(snap, db_path=None):
+    """يطبق snapshot على الـ DB المحدد"""
+    db_path = db_path or get_local_db()
+
     if not snap or 'dbs' not in snap:
         return {'applied': 0, 'skipped': 0, 'errors': 0}
 
     ta = ts = te = 0
 
-    # main DB
     main = snap.get('dbs', {}).get('main', {})
-    if os.path.exists(LOCAL_DB) and main:
-        with sqlite3.connect(LOCAL_DB, timeout=30) as conn:
+    if db_path and os.path.exists(db_path) and main:
+        with sqlite3.connect(db_path, timeout=30) as conn:
             for table, rows in main.items():
                 if table not in SYNC_TABLES:
                     continue
@@ -209,11 +212,12 @@ def apply_snapshot(snap):
                 ta += a; ts += s; te += e
             conn.commit()
 
-    # registry DB (garages)
-    reg = snap.get('dbs', {}).get('registry', {})
-    if os.path.exists(REGISTRY_DB) and reg:
-        with sqlite3.connect(REGISTRY_DB, timeout=30) as conn:
-            for table, rows in reg.items():
+    # registry
+    reg = get_registry_db()
+    reg_data = snap.get('dbs', {}).get('registry', {})
+    if os.path.exists(reg) and reg_data:
+        with sqlite3.connect(reg, timeout=30) as conn:
+            for table, rows in reg_data.items():
                 if table not in SYNC_TABLES:
                     continue
                 a, s, e = _apply_table(conn, table, rows)
@@ -221,12 +225,10 @@ def apply_snapshot(snap):
             conn.commit()
 
     return {'applied': ta, 'skipped': ts, 'errors': te}
-
-
 # ============================================================
 # Gist
 # ============================================================
-def _gist_read():
+def _gist_read(file_name='sync_state.json'):
     if not GITHUB_TOKEN or not GIST_ID:
         return None
     try:
@@ -238,22 +240,37 @@ def _gist_read():
         if r.status_code != 200:
             return None
         files = r.json().get('files', {})
-        content = files.get('sync_state.json', {}).get('content', '{}')
+        content = files.get(file_name, {}).get('content', '{}')
         return json.loads(content) if content else {}
     except Exception as e:
         print(f"[gist_read] {e}")
         return None
 
 
-def _gist_write(data):
+def _gist_write(data, file_name='sync_state.json'):
     if not GITHUB_TOKEN or not GIST_ID:
         return False
     try:
         payload = json.dumps(data, ensure_ascii=False, default=str)
+
+        # ⭐ اقرأ كل الملفات الحالية عشان نضيف الجديد
+        current = requests.get(
+            f'https://api.github.com/gists/{GIST_ID}',
+            headers={'Authorization': f'token {GITHUB_TOKEN}'},
+            timeout=30
+        ).json().get('files', {})
+
+        # نبني قائمة الملفات
+        files_payload = {file_name: {'content': payload}}
+        # نبقي الملفات التانية زي ما هي
+        for name in current:
+            if name != file_name and name.endswith('.json'):
+                files_payload[name] = current[name]
+
         r = requests.patch(
             f'https://api.github.com/gists/{GIST_ID}',
             headers={'Authorization': f'token {GITHUB_TOKEN}'},
-            json={'files': {'sync_state.json': {'content': payload}}},
+            json={'files': files_payload},
             timeout=120
         )
         return r.status_code == 200
@@ -261,44 +278,9 @@ def _gist_write(data):
         print(f"[gist_write] {e}")
         return False
 
-
 # ============================================================
 # Public API
 # ============================================================
-def push_full_sync():
-    ensure_updated_at()
-    local_snap = take_snapshot()
-
-    # ⭐ تحقق: هل الجهاز المحلي فيه داتا فعلاً؟
-    has_data = False
-    for db_key, tables in local_snap.get('dbs', {}).items():
-        for table_name, rows in tables.items():
-            if rows:
-                has_data = True
-                break
-        if has_data:
-            break
-
-    if not has_data:
-        return {
-            'ok': False,
-            'error': 'الجهاز الحالي فاضي — مش هرفع snapshot فاضي عشان ميمسحش داتا السيرفر'
-        }
-
-    # ⭐ اقرأ snapshot السيرفر الحالي
-    remote_snap = _gist_read() or {}
-
-    # ⭐ ادمج: خد من السيرفر + ضيف/حدّث من المحلي
-    merged = _merge_snapshots(remote_snap, local_snap)
-
-    if _gist_write(merged):
-        return {
-            'ok': True,
-            'device_id': DEVICE_ID,
-            'timestamp': merged['timestamp'],
-            'records_pushed': _count_records(local_snap),
-        }
-    return {'ok': False, 'error': 'فشل رفع الـ snapshot'}
 
 def _merge_snapshots(remote, local):
     """
@@ -354,31 +336,69 @@ def _count_records(snap):
         for table_name, rows in tables.items():
             total += len(rows)
     return total
-def pull_full_sync():
-    ensure_updated_at()
-    remote = _gist_read()
+def push_full_sync(db_path=None, garage_key='default'):
+    """يرفع snapshot للجراج المحدد"""
+    db_path = db_path or get_local_db()
+    file_name = f'sync_state_{garage_key}.json'
+
+    local_snap = take_snapshot(db_path=db_path)
+
+    has_data = False
+    for db_key, tables in local_snap.get('dbs', {}).items():
+        for table_name, rows in tables.items():
+            if rows:
+                has_data = True
+                break
+        if has_data:
+            break
+
+    if not has_data:
+        return {
+            'ok': False,
+            'error': 'الجهاز الحالي فاضي — مش هرفع snapshot فاضي'
+        }
+
+    remote_snap = _gist_read(file_name) or {}
+    merged = _merge_snapshots(remote_snap, local_snap)
+
+    if _gist_write(merged, file_name):
+        return {
+            'ok': True,
+            'device_id': DEVICE_ID,
+            'timestamp': merged['timestamp'],
+            'garage_key': garage_key,
+        }
+    return {'ok': False, 'error': 'فشل رفع الـ snapshot'}
+
+
+def pull_full_sync(db_path=None, garage_key='default'):
+    """ينزّل snapshot للجراج المحدد"""
+    db_path = db_path or get_local_db()
+    file_name = f'sync_state_{garage_key}.json'
+
+    remote = _gist_read(file_name)
     if not remote or not remote.get('dbs'):
-        return {'ok': False, 'error': 'مفيش snapshot على Gist'}
-    res = apply_snapshot(remote)
+        return {'ok': False, 'error': f'مفيش snapshot للجراج {garage_key} على Gist'}
+
+    res = apply_snapshot(remote, db_path=db_path)
     res['ok'] = True
     res['remote_device'] = remote.get('device_id')
     res['remote_timestamp'] = remote.get('timestamp')
     return res
 
 
-def sync_both_ways():
-    """مزامنة كاملة: نزّل + ارفع (بدمج آمن)"""
-    ensure_updated_at()
+def sync_both_ways(db_path=None, garage_key='default'):
+    """مزامنة كاملة للجراج المحدد"""
+    db_path = db_path or get_local_db()
+    file_name = f'sync_state_{garage_key}.json'
 
-    # 1) نزّل من السيرفر (لو موجود)
-    remote = _gist_read() or {}
+    remote = _gist_read(file_name) or {}
     if remote and remote.get('dbs'):
-        pull_result = apply_snapshot(remote)
+        pull_result = apply_snapshot(remote, db_path=db_path)
     else:
         pull_result = {'applied': 0, 'skipped': 0, 'errors': 0}
 
-    # 2) ارفع (بدمج آمن — لو الجهاز فيه داتا)
-    push_result = push_full_sync()
+    push_result = push_full_sync(db_path=db_path, garage_key=garage_key)
 
     return {
         'ok': push_result.get('ok') or pull_result.get('applied', 0) > 0,
@@ -386,15 +406,20 @@ def sync_both_ways():
         'pushed_ok': push_result.get('ok'),
         'pushed_error': push_result.get('error'),
         'pushed_device': push_result.get('device_id'),
+        'garage_key': garage_key,
     }
-def get_status():
+
+
+def get_status(garage_key='default'):
+    """حالة المزامنة للجراج المحدد"""
+    file_name = f'sync_state_{garage_key}.json'
     info = {
         'device_id': DEVICE_ID,
         'gist_configured': bool(GITHUB_TOKEN and GIST_ID),
-        'local_db': LOCAL_DB,
+        'garage_key': garage_key,
     }
     if info['gist_configured']:
-        remote = _gist_read()
+        remote = _gist_read(file_name)
         if remote:
             info['remote_device'] = remote.get('device_id')
             info['remote_timestamp'] = remote.get('timestamp')

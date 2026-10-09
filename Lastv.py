@@ -5035,7 +5035,6 @@ def main():
         # ⭐ قسم المزامنة ⭐
         # ========================================================
         st.markdown("### 🔄 المزامنة الكاملة")
-
         try:
             from sync_engine import (
                 sync_both_ways as _sync_both,
@@ -5044,7 +5043,16 @@ def main():
                 get_status as _get_status,
             )
 
-            _st = _get_status()
+            # ⭐ نحدد الجراج الحالي
+            _current_db_path = db.db_path
+            _current_garage_id = st.session_state.get('active_garage_id', 1)
+            _current_garage_name = st.session_state.get('active_garage_name', '?')
+            _garage_key = f"g{_current_garage_id}"    # مثال: g1, g2
+
+            st.caption(f"🏢 الجراج: **{_current_garage_name}**")
+            st.caption(f"🔑 المفتاح: `{_garage_key}`")
+
+            _st = _get_status(garage_key=_garage_key)
 
             if _st.get('gist_configured'):
                 st.caption(f"🆔 هذا الجهاز: `{_st['device_id']}`")
@@ -5054,15 +5062,14 @@ def main():
                     ts = _st.get('remote_timestamp', '') or ''
                     st.caption(f"🕐 {ts[:19]}")
                 else:
-                    st.caption("☁️ مفيش snapshot على Gist")
+                    st.caption(f"☁️ مفيش snapshot للجراج {_garage_key} على Gist")
 
-                # ⭐ زر المزامنة الكاملة
                 if st.button("🔄 مزامنة كاملة",
                              use_container_width=True,
                              key="sync_both_btn",
                              type="primary"):
                     with st.spinner("جاري المزامنة..."):
-                        _r = _sync_both()
+                        _r = _sync_both(db_path=_current_db_path, garage_key=_garage_key)
 
                     p = _r.get('pulled', {})
                     msg = f"⬇️ سُحب {p.get('applied', 0)} | تخطي {p.get('skipped', 0)}"
@@ -5085,7 +5092,7 @@ def main():
                 with c1:
                     if st.button("⬆️ رفع", use_container_width=True, key="push_full_btn"):
                         with st.spinner("..."):
-                            _r = _push_full()
+                            _r = _push_full(db_path=_current_db_path, garage_key=_garage_key)
                         if _r.get('ok'):
                             st.success("✅ رُفع")
                             time.sleep(1)
@@ -5095,7 +5102,7 @@ def main():
                 with c2:
                     if st.button("⬇️ سحب", use_container_width=True, key="pull_full_btn"):
                         with st.spinner("..."):
-                            _r = _pull_full()
+                            _r = _pull_full(db_path=_current_db_path, garage_key=_garage_key)
                         if _r.get('ok'):
                             st.success(
                                 f"✅ سُحب {_r.get('applied', 0)} | "
