@@ -4982,32 +4982,39 @@ def main():
             _st = _get_status()
 
             if _st.get('gist_configured'):
-                st.caption(f"🆔 `{_st['device_id']}`")
+                st.caption(f"🆔 هذا الجهاز: `{_st['device_id']}`")
 
                 if _st.get('remote_device'):
-                    st.caption(f"☁️ آخر رفع من `{_st['remote_device']}`")
+                    st.caption(f"☁️ آخر رفع من: `{_st['remote_device']}`")
                     ts = _st.get('remote_timestamp', '') or ''
                     st.caption(f"🕐 {ts[:19]}")
                 else:
                     st.caption("☁️ مفيش snapshot على Gist")
 
+                # ⭐ زر المزامنة الكاملة
                 if st.button("🔄 مزامنة كاملة",
                              use_container_width=True,
                              key="sync_both_btn",
                              type="primary"):
                     with st.spinner("جاري المزامنة..."):
                         _r = _sync_both()
-                    if _r.get('ok'):
-                        p = _r.get('pulled', {})
-                        st.success(
-                            f"✅ سُحب {p.get('applied', 0)} | "
-                            f"تخطي {p.get('skipped', 0)} | ↑ تم الرفع"
-                        )
+
+                    p = _r.get('pulled', {})
+                    msg = f"⬇️ سُحب {p.get('applied', 0)} | تخطي {p.get('skipped', 0)}"
+
+                    if _r.get('pushed_ok'):
+                        st.success(f"✅ {msg} | ⬆️ تم الرفع")
                         clear_all_caches()
                         time.sleep(2)
                         st.rerun()
+                    elif _r.get('pushed_error'):
+                        st.warning(f"⚠️ {msg} | ⚠️ {_r['pushed_error']}")
+                        if p.get('applied', 0) > 0:
+                            clear_all_caches()
+                            time.sleep(2)
+                            st.rerun()
                     else:
-                        st.error(f"❌ {_r.get('error', '')}")
+                        st.info(f"ℹ️ {msg}")
 
                 c1, c2 = st.columns(2)
                 with c1:

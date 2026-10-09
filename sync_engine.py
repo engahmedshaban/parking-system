@@ -267,12 +267,93 @@ def _gist_write(data):
 # ============================================================
 def push_full_sync():
     ensure_updated_at()
-    snap = take_snapshot()
-    if _gist_write(snap):
-        return {'ok': True, 'device_id': DEVICE_ID, 'timestamp': snap['timestamp']}
+    local_snap = take_snapshot()
+
+    # ⭐ تحقق: هل الجهاز المحلي فيه داتا فعلاً؟
+    has_data = False
+    for db_key, tables in local_snap.get('dbs', {}).items():
+        for table_name, rows in tables.items():
+            if rows:
+                has_data = True
+                break
+        if has_data:
+            break
+
+    if not has_data:
+        return {
+            'ok': False,
+            'error': 'الجهاز الحالي فاضي — مش هرفع snapshot فاضي عشان ميمسحش داتا السيرفر'
+        }
+
+    # ⭐ اقرأ snapshot السيرفر الحالي
+    remote_snap = _gist_read() or {}
+
+    # ⭐ ادمج: خد من السيرفر + ضيف/حدّث من المحلي
+    merged = _merge_snapshots(remote_snap, local_snap)
+
+    if _gist_write(merged):
+        return {
+            'ok': True,
+            'device_id': DEVICE_ID,
+            'timestamp': merged['timestamp'],
+            'records_pushed': _count_records(local_snap),
+        }
     return {'ok': False, 'error': 'فشل رفع الـ snapshot'}
 
+def _merge_snapshots(remote, local):
+    """
+    يدمج snapshot السيرفر مع snapshot الجهاز الحالي
+    - لكل سجل: اللي عنده updated_at أحدث يفوز
+    - السجلات الجديدة من أي جهاز تتضاف
+    """
+    merged = {
+        'device_id': DEVICE_ID,
+        'timestamp': datetime.now().isoformat(),
+        'dbs': {
+            'main': {},
+            'registry': {},
+        }
+    }
 
+    r_dbs = (remote or {}).get('dbs', {})
+    l_dbs = local.get('dbs', {})
+
+    for db_key in ['main', 'registry']:
+        r_tables = r_dbs.get(db_key, {})
+        l_tables = l_dbs.get(db_key, {})
+        all_tables = set(r_tables.keys()) | set(l_tables.keys())
+
+        merged['dbs'][db_key] = {}
+        for table in all_tables:
+            r_rows = r_tables.get(table, {})
+            l_rows = l_tables.get(table, {})
+
+            # ابدأ بالسجلات من السيرفر
+            combined = dict(r_rows)
+
+            # ضيف/حدّث من المحلي
+            for pk, l_entry in l_rows.items():
+                if pk not in combined:
+                    # سجل جديد من المحلي
+                    combined[pk] = l_entry
+                else:
+                    # نفس السجل موجود في الاتنين → اللي updated_at أحدث يفوز
+                    r_ts = combined[pk].get('_updated_at') or ''
+                    l_ts = l_entry.get('_updated_at') or ''
+                    if l_ts >= r_ts:
+                        combined[pk] = l_entry
+
+            merged['dbs'][db_key][table] = combined
+
+    return merged
+
+
+def _count_records(snap):
+    total = 0
+    for db_key, tables in snap.get('dbs', {}).items():
+        for table_name, rows in tables.items():
+            total += len(rows)
+    return total
 def pull_full_sync():
     ensure_updated_at()
     remote = _gist_read()
@@ -286,24 +367,26 @@ def pull_full_sync():
 
 
 def sync_both_ways():
-    """مزامنة كاملة: نزّل + ارفع"""
+    """مزامنة كاملة: نزّل + ارفع (بدمج آمن)"""
     ensure_updated_at()
 
+    # 1) نزّل من السيرفر (لو موجود)
     remote = _gist_read() or {}
     if remote and remote.get('dbs'):
         pull_result = apply_snapshot(remote)
     else:
         pull_result = {'applied': 0, 'skipped': 0, 'errors': 0}
 
+    # 2) ارفع (بدمج آمن — لو الجهاز فيه داتا)
     push_result = push_full_sync()
 
     return {
-        'ok': push_result.get('ok'),
+        'ok': push_result.get('ok') or pull_result.get('applied', 0) > 0,
         'pulled': pull_result,
+        'pushed_ok': push_result.get('ok'),
+        'pushed_error': push_result.get('error'),
         'pushed_device': push_result.get('device_id'),
     }
-
-
 def get_status():
     info = {
         'device_id': DEVICE_ID,
