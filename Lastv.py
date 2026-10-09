@@ -79,6 +79,14 @@ SESSION_VALIDITY_MINUTES = 30
 # ===================================================================
 def _get_base_data_dir():
     """يرجع مسار التخزين الأساسي — Volume على Railway أو المجلد الحالي"""
+    # ⭐ جديد: مجلد بيانات مخصص (نسخة الويندوز)
+    custom = os.environ.get('PARKING_DATA_DIR')
+    if custom:
+        try:
+            os.makedirs(custom, exist_ok=True)
+            return custom
+        except Exception:
+            pass
     if os.path.exists('/data') and os.path.isdir('/data'):
         try:
             test_file = os.path.join('/data', '.write_test')
