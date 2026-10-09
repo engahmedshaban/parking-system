@@ -4717,6 +4717,59 @@ def show_data_cleanup(db):
 # ===================================================================
 # ⭐⭐⭐ الدالة الرئيسية ⭐⭐⭐
 # ===================================================================
+# ⭐⭐⭐ صفحة تحميل التطبيقات ⭐⭐⭐
+# ===================================================================
+def show_download_apps_page():
+    st.markdown("## 📲 تحميل التطبيقات")
+
+    st.markdown("""
+    <div style="text-align:center; padding:20px; background:white;
+                border-radius:15px; margin-bottom:20px;
+                box-shadow:0 2px 10px rgba(0,0,0,0.1);">
+        <h2 style="color:#667eea; margin:0;">🚗 تطبيق Parking</h2>
+        <p style="color:#666; margin-top:8px;">
+            امسح كود الـ QR لتحميل التطبيق على هاتفك
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # الصورة الموحدة (iPhone + Android)
+    st.markdown("### 📱 امسح للتحميل")
+    try:
+        st.image("static/both_qr.png", use_container_width=True)
+    except Exception:
+        st.warning("⚠️ الصورة غير موجودة: static/both_qr.png")
+
+    st.markdown("---")
+
+    # صورتين منفصلتين
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("### 🍎 iPhone")
+        try:
+            st.image("static/iphone_qr.png", use_container_width=True)
+        except Exception:
+            st.warning("⚠️ static/iphone_qr.png")
+    with col2:
+        st.markdown("### 🤖 Android")
+        try:
+            st.image("static/android_qr.png", use_container_width=True)
+        except Exception:
+            st.warning("⚠️ static/android_qr.png")
+
+    st.markdown("---")
+    st.info("""
+    💡 **ملاحظات:**
+    - **iPhone:** الكود يفتح Safari — اضغط زر المشاركة 📤 ثم **"إضافة إلى الشاشة الرئيسية"**.
+    - **Android:** الكود يحمّل ملف APK مباشرة — اسمح بالتحميل من مصادر غير معروفة.
+    """)
+
+    if st.button("← العودة", use_container_width=True, key="back_from_download"):
+        st.session_state.pop('show_download_apps', None)
+        st.rerun()
+
+    render_developer_footer()
+# ===================================================================
 def main():
     # ⭐ بوابة المشترك للموبايل ⭐
     try:
@@ -4990,9 +5043,18 @@ def main():
         st.markdown("---")
         render_developer_footer()
 
-    if page is None:
+        # ⭐ زر تحميل التطبيقات (تحت الفوتر مباشرة)
+        if st.button("📲 تحميل التطبيقات", use_container_width=True, key="download_apps_sidebar_btn"):
+            st.session_state['show_download_apps'] = True
+            st.rerun()
+
+    # ⭐ عرض صفحة تحميل التطبيقات
+    if st.session_state.get('show_download_apps'):
+        show_download_apps_page()
         return
 
+    if page is None:
+        return
     if st.session_state.get('confirm_close_shift', False):
         _render_close_shift_confirmation(db, manager)
         return
