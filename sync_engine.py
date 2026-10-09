@@ -33,13 +33,9 @@ SYNC_TABLES = {
     'garages': 'id',          # من registry DB
 }
 
-
 def get_local_db():
-    """اكتشاف مسار DB الجراج النشط"""
-    env_db = os.environ.get('LOCAL_DB', '')
-    if env_db and os.path.exists(env_db):
-        return env_db
-
+    """اكتشاف مسار DB الجراج النشط — الأولوية دائمًا للـ registry"""
+    # ⭐ 1) الأولوية القصوى: الجراج النشط من الـ registry
     registry = '/data/garages_registry.db' if os.path.exists('/data') else 'garages_registry.db'
     if os.path.exists(registry):
         try:
@@ -49,11 +45,20 @@ def get_local_db():
                     "SELECT db_path FROM garages WHERE is_active=1 ORDER BY id LIMIT 1"
                 ).fetchone()
                 if row and row['db_path'] and os.path.exists(row['db_path']):
+                    print(f"[get_local_db] Using active garage DB: {row['db_path']}")
                     return row['db_path']
-        except Exception:
-            pass
-    return 'garage.db'
+        except Exception as e:
+            print(f"[get_local_db] Registry error: {e}")
 
+    # ⭐ 2) احتياطي: LOCAL_DB من .env
+    env_db = os.environ.get('LOCAL_DB', '')
+    if env_db and os.path.exists(env_db):
+        print(f"[get_local_db] Fallback to LOCAL_DB: {env_db}")
+        return env_db
+
+    # ⭐ 3) الأخير: garage.db
+    print("[get_local_db] Fallback to garage.db")
+    return 'garage.db'
 
 def get_registry_db():
     return '/data/garages_registry.db' if os.path.exists('/data') else 'garages_registry.db'
