@@ -3064,6 +3064,11 @@ def garage_selection_login_screen(registry):
 # ⭐⭐⭐ صفحة الدخول ⭐⭐⭐
 # ===================================================================
 def login_page(db):
+    # ⭐ عرض صفحة التطبيقات لو مطلوب
+    if st.session_state.get('show_download_apps'):
+        show_download_apps_page()
+        return
+
     selected = st.session_state.get('selected_login_garage')
     selected_name = selected.get('name') if selected else db.get_garage_name()
 
@@ -3116,10 +3121,14 @@ def login_page(db):
                     except Exception as e:
                         st.error(f"❌ خطأ: {e}")
 
+        # ⭐ زر تحميل التطبيقات (جديد)
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("📲 تحميل التطبيقات", use_container_width=True, key="download_apps_login_btn"):
+            st.session_state['show_download_apps'] = True
+            st.rerun()
+
     st.markdown("---")
     render_developer_footer()
-
-
 # ===================================================================
 # ⭐⭐⭐ إدارة المستخدمين ⭐⭐⭐
 # ===================================================================
