@@ -3780,8 +3780,13 @@ def manage_subscribers(manager):
 
     tabs = st.tabs(["➕ إضافة مشترك", "📋 قائمة المشتركين", "🔄 تجديد"])
 
+    # ⭐ مفتاح فريد لتجنب التعارض عند إعادة الرندر
+    _form_nonce = st.session_state.get('_add_sub_nonce', 0)
+    _form_key = f"add_sub_form_{_form_nonce}"
+    st.session_state['_add_sub_nonce'] = _form_nonce + 1
+
     with tabs[0]:
-        with st.form("add_sub"):
+        with st.form(_form_key, clear_on_submit=True):
             c1, c2 = st.columns(2)
             with c1:
                 n = st.text_input("👤 الاسم *")
@@ -3791,10 +3796,10 @@ def manage_subscribers(manager):
                 ct = st.text_input("🚙 النوع")
                 cc = st.text_input("🎨 رقم السيارة")
                 ph = st.text_input("📱 الهاتف *")
-            stype = st.selectbox("📅 الاشتراك", list(manager.subscription_plans.keys()))
-            sd = st.date_input("📅 البداية", datetime.now())
+            stype = st.selectbox("📅 الاشتراك", list(manager.subscription_plans.keys()), key=f"{_form_key}_stype")
+            sd = st.date_input("📅 البداية", datetime.now(), key=f"{_form_key}_sd")
             days = manager.subscription_plans.get(stype, 30)
-            ed = st.date_input("📅 النهاية", sd + timedelta(days=days))
+            ed = st.date_input("📅 النهاية", sd + timedelta(days=days), key=f"{_form_key}_ed")
             if st.form_submit_button("✅ إضافة", use_container_width=True):
                 if n and cn and ph:
                     d = {'name': n, 'workplace': w, 'car_number': cn, 'car_type': ct, 'car_color': cc, 'phone': ph,
@@ -4826,7 +4831,6 @@ def main():
 
         db_path = g['db_path']
         if not os.path.exists(db_path):
-            # ⭐ ننشئ قاعدة البيانات لو مش موجودة (الـ Railway Volume بيحتفظ بيها)
             try:
                 _ = Database(db_path)
             except Exception as e:
@@ -4889,13 +4893,23 @@ def main():
     role_name = {'admin': 'مدير', 'manager': 'مدير الجراج', 'entry': 'دخول', 'exit': 'خروج',
                  'subscriber': 'مشتركين', 'super_admin': 'Super Admin ⭐'}.get(ur, ur)
 
-    st.markdown(f"""<div class="main-header"><div><h1>🚗 {garage_name}</h1><p>مرحباً {st.session_state.get('user_name', '')}</p></div><span class="badge {role_badge}">{role_name}</span></div>""", unsafe_allow_html=True)
+    st.markdown(
+        f"""<div class="main-header"><div><h1>🚗 {garage_name}</h1><p>مرحباً {st.session_state.get('user_name', '')}</p></div><span class="badge {role_badge}">{role_name}</span></div>""",
+        unsafe_allow_html=True
+    )
 
     if not expired and expiry_dt and ur in ['admin', 'manager', 'super_admin']:
         days_left = (expiry_dt - datetime.now()).days
         if 0 <= days_left <= 14:
-            st.warning(f"⚠️ **تنبيه:** سينتهي ترخيص النظام خلال **{days_left} يوم** (بتاريخ {expiry_dt.strftime('%Y-%m-%d')}). للتواصل: {DEVELOPER_NAME} — {DEVELOPER_PHONE}")
+            st.warning(
+                f"⚠️ **تنبيه:** سينتهي ترخيص النظام خلال **{days_left} يوم** "
+                f"(بتاريخ {expiry_dt.strftime('%Y-%m-%d')}). "
+                f"للتواصل: {DEVELOPER_NAME} — {DEVELOPER_PHONE}"
+            )
 
+    # ========================================================
+    # ⭐⭐⭐ Sidebar ⭐⭐⭐
+    # ========================================================
     with st.sidebar:
         _curr_g = None
         try:
@@ -4905,14 +4919,17 @@ def main():
             pass
         _curr_name = _curr_g['name'] if _curr_g else garage_name
 
-        st.markdown(f"""
+        st.markdown(
+            f"""
         <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                     color: white; padding: 12px; border-radius: 10px;
                     text-align: center; font-weight: bold; margin-bottom: 10px;">
             🏢 الجراج الحالي<br>
             <span style="font-size: 15px;">{_curr_name}</span>
         </div>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True
+        )
 
         if ur == 'super_admin':
             if st.button("🔄 تبديل الجراج", use_container_width=True, key="switch_garage_sidebar"):
@@ -4922,6 +4939,9 @@ def main():
 
         st.markdown("---")
 
+        # ========================================================
+        # ⭐ الورديات ⭐
+        # ========================================================
         current_shift = db.get_current_shift()
         if current_shift:
             st.success(f"🟢 مفتوحة - {current_shift['opened_by']}")
@@ -4945,10 +4965,13 @@ def main():
                         st.rerun()
 
         st.markdown("---")
-        # ⭐ قسم المزامنة
-        st.markdown("---")
+
+        # ========================================================
+        # ⭐ قسم المزامنة ⭐
+        # ========================================================
         st.markdown("### 🔄 المزامنة")
 
+        # ─── 1) المزامنة العادية ───
         try:
             from sync_manager import sync_now as _sync_now, get_sync_status as _get_sync_status
             _status = _get_sync_status()
@@ -4973,37 +4996,120 @@ def main():
                 st.caption("⚠️ Gist غير مُعدّ")
         except ImportError:
             st.caption("⚠️ sync_manager غير موجود")
-        except Exception as e:
-            st.caption(f"❌ {str(e)[:50]}")
+        except Exception as _e:
+            st.caption(f"❌ {str(_e)[:50]}")
+
+        # ─── 2) مزامنة السيرفر لأول مرة فقط ───
+        st.markdown("---")
+        with st.expander("⬇️ مزامنة السيرفر (أول مرة فقط)", expanded=False):
+            st.caption(
+                "اسحب كل الداتا من الـ Gist (السيرفر) وطبقها محليًا. "
+                "يُستخدم مرة واحدة عند بدء جهاز جديد."
+            )
+
+            try:
+                from first_sync import get_gist_info, force_pull_all
+
+                _info = get_gist_info()
+
+                if not _info.get('ok'):
+                    st.error(f"❌ {_info.get('error', 'خطأ غير معروف')}")
+                else:
+                    st.info(
+                        f"📊 الـ Gist فيه **{_info['total']}** تغيير | "
+                        f"آخر تحديث: {_info['last_update']}"
+                    )
+
+                    if _info['total'] > 0:
+                        with st.expander("📋 تفاصيل الـ Gist", expanded=False):
+                            st.write("**الأجهزة اللي رفعت الداتا:**")
+                            for dev, cnt in _info['devices'].items():
+                                marker = " ← أنت" if dev == _info.get('my_device') else ""
+                                st.write(f"- `{dev}`: {cnt} تغيير{marker}")
+                            st.write("**الجداول:**")
+                            for tbl, cnt in _info['tables'].items():
+                                st.write(f"- {tbl}: {cnt}")
+
+                        st.warning(
+                            "⚠️ **تحذير:** لو الداتا المحلية فيها تغييرات، "
+                            "هيتم استبدالها بالداتا اللي جاية من السيرفر."
+                        )
+
+                        if st.button(
+                            "⬇️ اسحب الداتا الآن",
+                            key="force_pull_btn",
+                            use_container_width=True,
+                            type="primary"
+                        ):
+                            with st.spinner("جاري سحب الداتا من السيرفر..."):
+                                _r = force_pull_all(db.db_path)
+
+                            if _r.get('ok'):
+                                st.success(f"✅ تم تطبيق **{_r['applied']}** سجل")
+                                st.write(f"👤 مشتركين: **{_r['subs_count']}**")
+                                st.write(f"🅿️ أماكن: **{_r['spots_count']}**")
+                                st.write(f"🚗 زوار نشطين: **{_r['vis_count']}**")
+
+                                if _r.get('skipped'):
+                                    st.caption(f"⏭️ تم تخطي: {_r['skipped']}")
+                                if _r.get('errors'):
+                                    st.caption(f"⚠️ أخطاء: {_r['errors']}")
+
+                                st.info("🔄 أعد تشغيل التطبيق لرؤية التغييرات")
+                                time.sleep(2)
+                                st.rerun()
+                            else:
+                                st.error(f"❌ {_r.get('error', 'فشل')}")
+                    else:
+                        st.warning("⚠️ الـ Gist فاضي — مفيش داتا لسحبها")
+
+            except ImportError as _e:
+                st.error(f"❌ first_sync.py مش موجود: {_e}")
+            except Exception as _e:
+                st.error(f"❌ {str(_e)[:120]}")
+
+        st.markdown("---")
+
+        # ========================================================
+        # ⭐ القائمة الرئيسية ⭐
+        # ========================================================
         menu_items = []
 
         if ur == 'super_admin':
-            menu_items.extend(["🔐 لوحة Super Admin", "🏢 إدارة الجراجات",
-                               "🏠 لوحة التحكم", "🗺️ عرض الجراج",
-                               "👤 إدارة المشتركين", "📝 تخصيص مكان", "📥 دخول", "📤 خروج",
-                               "💰 التقارير المالية", "📊 التقارير", "⚠️ التنبيهات",
-                               "📜 سجل العمليات", "🕒 إدارة الورديات",
-                               "📱 دفعات التطبيق",
-                               "👥 إدارة المستخدمين", "⚙️ إعدادات النظام", "🗑️ مسح البيانات"])
+            menu_items.extend([
+                "🔐 لوحة Super Admin", "🏢 إدارة الجراجات",
+                "🏠 لوحة التحكم", "🗺️ عرض الجراج",
+                "👤 إدارة المشتركين", "📝 تخصيص مكان", "📥 دخول", "📤 خروج",
+                "💰 التقارير المالية", "📊 التقارير", "⚠️ التنبيهات",
+                "📜 سجل العمليات", "🕒 إدارة الورديات",
+                "📱 دفعات التطبيق",
+                "👥 إدارة المستخدمين", "⚙️ إعدادات النظام", "🗑️ مسح البيانات"
+            ])
         elif ur == 'entry':
             menu_items.extend(["🏠 لوحة التحكم", "🗺️ عرض الجراج", "📥 دخول", "📜 سجل العمليات"])
         elif ur == 'exit':
             menu_items.extend(["🏠 لوحة التحكم", "📤 خروج", "📜 سجل العمليات"])
         elif ur == 'subscriber':
-            menu_items.extend(["🏠 لوحة التحكم", "🗺️ عرض الجراج", "👤 إدارة المشتركين",
-                               "📝 تخصيص مكان", "💰 التقارير المالية", "📊 التقارير",
-                               "⚠️ التنبيهات", "📜 سجل العمليات"])
+            menu_items.extend([
+                "🏠 لوحة التحكم", "🗺️ عرض الجراج", "👤 إدارة المشتركين",
+                "📝 تخصيص مكان", "💰 التقارير المالية", "📊 التقارير",
+                "⚠️ التنبيهات", "📜 سجل العمليات"
+            ])
         elif ur == 'manager':
-            menu_items.extend(["🏠 لوحة التحكم", "🗺️ عرض الجراج", "👤 إدارة المشتركين",
-                               "📝 تخصيص مكان", "📥 دخول", "📤 خروج",
-                               "💰 التقارير المالية", "📊 التقارير", "⚠️ التنبيهات",
-                               "📜 سجل العمليات", "🕒 إدارة الورديات"])
+            menu_items.extend([
+                "🏠 لوحة التحكم", "🗺️ عرض الجراج", "👤 إدارة المشتركين",
+                "📝 تخصيص مكان", "📥 دخول", "📤 خروج",
+                "💰 التقارير المالية", "📊 التقارير", "⚠️ التنبيهات",
+                "📜 سجل العمليات", "🕒 إدارة الورديات"
+            ])
         elif ur == 'admin':
-            menu_items.extend(["🏠 لوحة التحكم", "🗺️ عرض الجراج", "👤 إدارة المشتركين",
-                               "📝 تخصيص مكان", "📥 دخول", "📤 خروج",
-                               "💰 التقارير المالية", "📊 التقارير", "⚠️ التنبيهات",
-                               "📜 سجل العمليات", "🕒 إدارة الورديات",
-                               "👥 إدارة المستخدمين", "⚙️ إعدادات النظام", "🗑️ مسح البيانات"])
+            menu_items.extend([
+                "🏠 لوحة التحكم", "🗺️ عرض الجراج", "👤 إدارة المشتركين",
+                "📝 تخصيص مكان", "📥 دخول", "📤 خروج",
+                "💰 التقارير المالية", "📊 التقارير", "⚠️ التنبيهات",
+                "📜 سجل العمليات", "🕒 إدارة الورديات",
+                "👥 إدارة المستخدمين", "⚙️ إعدادات النظام", "🗑️ مسح البيانات"
+            ])
 
         goto_page = st.session_state.pop('_goto_page', None)
 
@@ -5022,18 +5128,26 @@ def main():
             page = None
 
         st.markdown("---")
+
+        # ========================================================
+        # ⭐ إحصائيات سريعة ⭐
+        # ========================================================
         stats = get_cached_dashboard_stats(db.db_path)
         c1, c2 = st.columns(2)
-        with c1: st.metric("🚗 مشغول", stats['occupied'])
-        with c2: st.metric("🟢 متاح", stats['total'] - stats['occupied'])
+        with c1:
+            st.metric("🚗 مشغول", stats['occupied'])
+        with c2:
+            st.metric("🟢 متاح", stats['total'] - stats['occupied'])
         st.metric("👤 المشتركين", stats['subs'])
 
         exp = manager.get_expiring_subscribers()
         expd = manager.get_expired_subscribers()
         if exp or expd:
             st.markdown("---")
-            if exp: st.warning(f"🟡 {len(exp)} قارب")
-            if expd: st.error(f"🔴 {len(expd)} منتهي")
+            if exp:
+                st.warning(f"🟡 {len(exp)} قارب")
+            if expd:
+                st.error(f"🔴 {len(expd)} منتهي")
 
         if expiry_dt:
             st.markdown("---")
@@ -5047,9 +5161,11 @@ def main():
                     st.info(f"✅ الترخيص ساري\n{expiry_dt.strftime('%Y-%m-%d')}")
 
         st.markdown("---")
+
         if st.button("🚪 تسجيل الخروج", use_container_width=True, key="logout"):
             for k in list(st.session_state.keys()):
-                if k not in ['db', 'garage_manager', 'visitor_manager', 'attendance_manager', 'garage_registry', 'active_garage_id', 'selected_login_garage']:
+                if k not in ['db', 'garage_manager', 'visitor_manager', 'attendance_manager',
+                             'garage_registry', 'active_garage_id', 'selected_login_garage']:
                     try:
                         st.session_state.pop(k, None)
                     except Exception:
@@ -5060,22 +5176,28 @@ def main():
         st.markdown("---")
         render_developer_footer()
 
-        # ⭐ زر تحميل التطبيقات (تحت الفوتر مباشرة)
         if st.button("📲 تحميل التطبيقات", use_container_width=True, key="download_apps_sidebar_btn"):
             st.session_state['show_download_apps'] = True
             st.rerun()
 
-    # ⭐ عرض صفحة تحميل التطبيقات
+    # ========================================================
+    # ⭐⭐⭐ عرض الصفحات ⭐⭐⭐
+    # ========================================================
+
+    # ⭐ صفحة تحميل التطبيقات
     if st.session_state.get('show_download_apps'):
         show_download_apps_page()
         return
 
     if page is None:
         return
+
+    # ⭐ تأكيد إغلاق الوردية
     if st.session_state.get('confirm_close_shift', False):
         _render_close_shift_confirmation(db, manager)
         return
 
+    # ⭐ الإيصال
     if st.session_state.get('receipt_data'):
         d = st.session_state['receipt_data']
         display_receipt_with_buttons(
@@ -5086,6 +5208,7 @@ def main():
         )
         return
 
+    # ⭐ التوجيه للصفحات
     if page == "🔐 لوحة Super Admin" and ur == 'super_admin':
         super_admin_page(db, manager)
     elif page == "🏢 إدارة الجراجات" and ur == 'super_admin':
@@ -5123,7 +5246,6 @@ def main():
         show_shift_management(db, manager)
     elif page == "🗑️ مسح البيانات" and ur in ['admin', 'super_admin']:
         show_data_cleanup(db)
-
 
 if __name__ == "__main__":
     main()
