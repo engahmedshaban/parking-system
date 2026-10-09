@@ -5,7 +5,8 @@ import json
 import os
 import requests
 from datetime import datetime
-
+import gzip
+import base64
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -239,9 +240,39 @@ def _gist_read(file_name='sync_state.json'):
         )
         if r.status_code != 200:
             return None
+
         files = r.json().get('files', {})
-        content = files.get(file_name, {}).get('content', '{}')
-        return json.loads(content) if content else {}
+        file_info = files.get(file_name)
+        if not file_info:
+            return {}
+
+        content = file_info.get('content', '')
+
+        # ⭐ لو المحتوى فاضي أو مقطوع، نستخدم raw_url
+        if not content or file_info.get('truncated'):
+            raw_url = file_info.get('raw_url')
+            if raw_url:
+                try:
+                    rr = requests.get(raw_url, timeout=60)
+                    if rr.status_code == 200:
+                        content = rr.text
+                except Exception as e:
+                    print(f"[gist_read raw] {e}")
+
+        if not content:
+            return {}
+
+        # ⭐ لو الملف مضغوط (يبدأ بـ GZIP:)
+        if content.startswith('GZIP:'):
+            try:
+                raw = base64.b64decode(content[5:])
+                decompressed = gzip.decompress(raw)
+                return json.loads(decompressed.decode('utf-8'))
+            except Exception as e:
+                print(f"[gist_read decompress] {e}")
+                return {}
+
+        return json.loads(content)
     except Exception as e:
         print(f"[gist_read] {e}")
         return None
@@ -251,33 +282,23 @@ def _gist_write(data, file_name='sync_state.json'):
     if not GITHUB_TOKEN or not GIST_ID:
         return False
     try:
+        # ⭐ اضغط البيانات
         payload = json.dumps(data, ensure_ascii=False, default=str)
+        compressed = gzip.compress(payload.encode('utf-8'))
+        b64 = base64.b64encode(compressed).decode('ascii')
+        content = 'GZIP:' + b64
 
-        # ⭐ اقرأ كل الملفات الحالية عشان نضيف الجديد
-        current = requests.get(
-            f'https://api.github.com/gists/{GIST_ID}',
-            headers={'Authorization': f'token {GITHUB_TOKEN}'},
-            timeout=30
-        ).json().get('files', {})
-
-        # نبني قائمة الملفات
-        files_payload = {file_name: {'content': payload}}
-        # نبقي الملفات التانية زي ما هي
-        for name in current:
-            if name != file_name and name.endswith('.json'):
-                files_payload[name] = current[name]
-
+        # ⭐ PATCH بسيط — GitHub بيحفظ الملفات التانية تلقائيًا
         r = requests.patch(
             f'https://api.github.com/gists/{GIST_ID}',
             headers={'Authorization': f'token {GITHUB_TOKEN}'},
-            json={'files': files_payload},
+            json={'files': {file_name: {'content': content}}},
             timeout=120
         )
         return r.status_code == 200
     except Exception as e:
         print(f"[gist_write] {e}")
         return False
-
 # ============================================================
 # Public API
 # ============================================================
