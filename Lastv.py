@@ -4969,36 +4969,78 @@ def main():
         # ========================================================
         # ⭐ قسم المزامنة ⭐
         # ========================================================
-        st.markdown("### 🔄 المزامنة")
+        st.markdown("### 🔄 المزامنة الكاملة")
 
-        # ─── 1) المزامنة العادية ───
         try:
-            from sync_manager import sync_now as _sync_now, get_sync_status as _get_sync_status
-            _status = _get_sync_status()
+            from sync_engine import (
+                sync_both_ways as _sync_both,
+                push_full_sync as _push_full,
+                pull_full_sync as _pull_full,
+                get_status as _get_status,
+            )
 
-            if _status.get('gist_configured'):
+            _st = _get_status()
+
+            if _st.get('gist_configured'):
+                st.caption(f"🆔 `{_st['device_id']}`")
+
+                if _st.get('remote_device'):
+                    st.caption(f"☁️ آخر رفع من `{_st['remote_device']}`")
+                    ts = _st.get('remote_timestamp', '') or ''
+                    st.caption(f"🕐 {ts[:19]}")
+                else:
+                    st.caption("☁️ مفيش snapshot على Gist")
+
+                if st.button("🔄 مزامنة كاملة",
+                             use_container_width=True,
+                             key="sync_both_btn",
+                             type="primary"):
+                    with st.spinner("جاري المزامنة..."):
+                        _r = _sync_both()
+                    if _r.get('ok'):
+                        p = _r.get('pulled', {})
+                        st.success(
+                            f"✅ سُحب {p.get('applied', 0)} | "
+                            f"تخطي {p.get('skipped', 0)} | ↑ تم الرفع"
+                        )
+                        clear_all_caches()
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {_r.get('error', '')}")
+
                 c1, c2 = st.columns(2)
                 with c1:
-                    st.metric("📤 معلق", _status.get('pending', 0))
-                with c2:
-                    st.metric("🆔 الجهاز", _status.get('device_id', '?')[:8])
-
-                if st.button("🔄 مزامنة الآن", use_container_width=True, key="sync_now_btn"):
-                    with st.spinner("جاري المزامنة..."):
-                        _r = _sync_now()
-                        if _r['pushed'] or _r['pulled']:
-                            st.success(f"✅ ↑{_r['pushed']} ↓{_r['pulled']}")
+                    if st.button("⬆️ رفع", use_container_width=True, key="push_full_btn"):
+                        with st.spinner("..."):
+                            _r = _push_full()
+                        if _r.get('ok'):
+                            st.success("✅ رُفع")
                             time.sleep(1)
                             st.rerun()
                         else:
-                            st.info("لا يوجد تغييرات")
+                            st.error(f"❌ {_r.get('error', '')}")
+                with c2:
+                    if st.button("⬇️ سحب", use_container_width=True, key="pull_full_btn"):
+                        with st.spinner("..."):
+                            _r = _pull_full()
+                        if _r.get('ok'):
+                            st.success(
+                                f"✅ سُحب {_r.get('applied', 0)} | "
+                                f"تخطي {_r.get('skipped', 0)}"
+                            )
+                            clear_all_caches()
+                            time.sleep(2)
+                            st.rerun()
+                        else:
+                            st.error(f"❌ {_r.get('error', '')}")
             else:
                 st.caption("⚠️ Gist غير مُعدّ")
-        except ImportError:
-            st.caption("⚠️ sync_manager غير موجود")
-        except Exception as _e:
-            st.caption(f"❌ {str(_e)[:50]}")
 
+        except ImportError as _e:
+            st.error(f"❌ sync_engine.py مش موجود: {_e}")
+        except Exception as _e:
+            st.error(f"❌ {str(_e)[:150]}")
         # ─── 2) مزامنة السيرفر لأول مرة فقط ───
         st.markdown("---")
         with st.expander("⬇️ مزامنة السيرفر (أول مرة فقط)", expanded=False):
