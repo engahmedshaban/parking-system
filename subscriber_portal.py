@@ -559,10 +559,38 @@ def login_screen():
         submit = st.form_submit_button("🚀 دخول", use_container_width=True)
 
         if submit:
-            # ... الكود القديم زي ما هو ...
-            pass
+            if not phone.strip():
+                st.warning("⚠️ أدخل رقم التلفون")
+            else:
+                db_path = st.session_state.get('sub_portal_garage_db_path')
+                if not db_path or not os.path.exists(db_path):
+                    st.error("❌ قاعدة بيانات الجراج غير موجودة")
+                    return
 
-    # ⭐ الزر الجديد
+                _init_app_tables(db_path)
+                sub = get_subscriber_by_phone(db_path, phone.strip())
+
+                if not sub:
+                    st.error("❌ رقم التلفون غير مسجل في هذا الجراج")
+                else:
+                    token = _save_session_token(db_path, sub['id'], garage_id)
+
+                    if not token:
+                        st.error("❌ فشل إنشاء جلسة")
+                        return
+
+                    st.session_state['sub_portal_logged_in'] = True
+                    st.session_state['sub_portal_phone'] = phone.strip()
+                    st.session_state['sub_portal_sub_id'] = sub['id']
+                    st.session_state['sub_portal_token'] = token
+
+                    st.query_params["view"] = "subscriber"
+                    st.query_params["token"] = token
+
+                    time.sleep(0.3)
+                    st.rerun()
+
+    # ⭐ زر تحميل التطبيقات
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("📲 تحميل التطبيقات", key="download_apps_portal_login", use_container_width=True):
         st.session_state['sub_portal_show_download'] = True
