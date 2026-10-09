@@ -3780,39 +3780,44 @@ def manage_subscribers(manager):
 
     tabs = st.tabs(["➕ إضافة مشترك", "📋 قائمة المشتركين", "🔄 تجديد"])
 
-    # ⭐ مفتاح فريد لتجنب التعارض عند إعادة الرندر
-    _form_nonce = st.session_state.get('_add_sub_nonce', 0)
-    _form_key = f"add_sub_form_{_form_nonce}"
-    st.session_state['_add_sub_nonce'] = _form_nonce + 1
-
     with tabs[0]:
-        with st.form(_form_key, clear_on_submit=True):
+        with st.form("add_sub_form_stable", clear_on_submit=True):
             c1, c2 = st.columns(2)
             with c1:
-                n = st.text_input("👤 الاسم *")
-                w = st.text_input("🏢 جهة العمل")
-                cn = st.text_input("🚗 رقم الكارت *")
+                n = st.text_input("👤 الاسم *", key="add_n")
+                w = st.text_input("🏢 جهة العمل", key="add_w")
+                cn = st.text_input("🚗 رقم الكارت *", key="add_cn")
             with c2:
-                ct = st.text_input("🚙 النوع")
-                cc = st.text_input("🎨 رقم السيارة")
-                ph = st.text_input("📱 الهاتف *")
-            stype = st.selectbox("📅 الاشتراك", list(manager.subscription_plans.keys()), key=f"{_form_key}_stype")
-            sd = st.date_input("📅 البداية", datetime.now(), key=f"{_form_key}_sd")
+                ct = st.text_input("🚙 النوع", key="add_ct")
+                cc = st.text_input("🎨 رقم السيارة", key="add_cc")
+                ph = st.text_input("📱 الهاتف *", key="add_ph")
+
+            stype = st.selectbox("📅 الاشتراك", list(manager.subscription_plans.keys()), key="add_stype")
+            sd = st.date_input("📅 البداية", datetime.now(), key="add_sd")
             days = manager.subscription_plans.get(stype, 30)
-            ed = st.date_input("📅 النهاية", sd + timedelta(days=days), key=f"{_form_key}_ed")
-            if st.form_submit_button("✅ إضافة", use_container_width=True):
+            ed = st.date_input("📅 النهاية", sd + timedelta(days=days), key="add_ed")
+
+            _submitted = st.form_submit_button("✅ إضافة", use_container_width=True)
+
+            if _submitted:
                 if n and cn and ph:
-                    d = {'name': n, 'workplace': w, 'car_number': cn, 'car_type': ct, 'car_color': cc, 'phone': ph,
-                         'subscription_type': stype, 'payment_amount': 0,
-                         'subscription_start': sd.isoformat(), 'subscription_end': ed.isoformat()}
+                    d = {
+                        'name': n, 'workplace': w, 'car_number': cn,
+                        'car_type': ct, 'car_color': cc, 'phone': ph,
+                        'subscription_type': stype, 'payment_amount': 0,
+                        'subscription_start': sd.isoformat(),
+                        'subscription_end': ed.isoformat()
+                    }
                     sid = manager.add_subscriber(d)
                     if sid:
-                        st.success(f"✅ {sid}")
+                        st.success(f"✅ تمت الإضافة: {sid}")
+                        clear_all_caches()
+                        time.sleep(1)
+                        st.rerun()
                     else:
-                        st.error("❌ رقم الكارت مستخدم")
+                        st.error("❌ رقم الكارت مستخدم بالفعل")
                 else:
-                    st.error("❌ املأ الحقول *")
-
+                    st.error("❌ املأ الحقول المطلوبة (*)")
     with tabs[1]:
         page_size = 10
         c1, c2, c3 = st.columns(3)

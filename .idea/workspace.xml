@@ -5,7 +5,6 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="7a0fbe0c-3178-41d0-9d11-48523b6a15d4" name="Changes" comment="commit">
-      <change afterPath="$PROJECT_DIR$/diagnose.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -116,7 +115,7 @@
     "com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1": "true",
     "git-widget-placeholder": "main",
     "junie.onboarding.icon.badge.shown": "true",
-    "last_opened_file_path": "D:/parking-web/parking/static",
+    "last_opened_file_path": "D:/parking-web/parking/garages",
     "node.js.detected.package.eslint": "true",
     "node.js.detected.package.jshint": "true",
     "node.js.detected.package.tslint": "true",
@@ -129,6 +128,7 @@
 }]]></component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
+      <recent name="D:\parking-web\parking\garages" />
       <recent name="D:\parking-web\parking\static" />
       <recent name="D:\parking-web\parking" />
       <recent name="D:\parking-web\parking\.venv" />
@@ -501,7 +501,15 @@
       <option name="project" value="LOCAL" />
       <updated>1791580668048</updated>
     </task>
-    <option name="localTasksCounter" value="45" />
+    <task id="LOCAL-00045" summary="commit">
+      <option name="closed" value="true" />
+      <created>1791581991255</created>
+      <option name="number" value="00045" />
+      <option name="presentableId" value="LOCAL-00045" />
+      <option name="project" value="LOCAL" />
+      <updated>1791581991255</updated>
+    </task>
+    <option name="localTasksCounter" value="46" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
