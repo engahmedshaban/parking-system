@@ -4793,6 +4793,66 @@ def show_download_apps_page():
     render_developer_footer()
 # ===================================================================
 def main():
+    # ⭐⭐⭐ كود مؤقت لتنزيل DB من Railway ⭐⭐⭐
+    try:
+        if st.query_params.get("download_db") == "yes":
+            import glob
+            st.title("📥 تنزيل قاعدة بيانات الجراج")
+
+            # ابحث عن كل ملفات .db
+            base_dir = "/data/garages" if os.path.exists("/data/garages") else "garages"
+            st.write(f"🔍 أبحث في: `{base_dir}`")
+
+            db_files = []
+            if os.path.exists(base_dir):
+                for f in os.listdir(base_dir):
+                    if f.endswith('.db'):
+                        fp = os.path.join(base_dir, f)
+                        size_kb = os.path.getsize(fp) / 1024
+                        db_files.append((f, fp, size_kb))
+
+            if not db_files:
+                st.error(f"❌ مفيش ملفات .db في {base_dir}")
+                st.write("**الملفات الموجودة:**")
+                try:
+                    for f in os.listdir(base_dir):
+                        st.write(f"- {f}")
+                except Exception as e:
+                    st.write(f"خطأ: {e}")
+                st.stop()
+
+            st.success(f"✅ لقيت {len(db_files)} ملف")
+
+            for fname, fpath, size_kb in db_files:
+                st.markdown(f"### 📄 {fname}")
+                st.write(f"**الحجم:** {size_kb:.1f} KB")
+
+                try:
+                    with open(fpath, "rb") as f:
+                        data = f.read()
+
+                    st.download_button(
+                        label=f"⬇️ نزّل {fname}",
+                        data=data,
+                        file_name=fname,
+                        mime="application/octet-stream",
+                        key=f"dl_{fname}"
+                    )
+                except Exception as e:
+                    st.error(f"❌ فشل قراءة {fname}: {e}")
+
+            st.markdown("---")
+            st.warning("⚠️ **مهم:** بعد ما تنزّل الملف، امسح الكود ده من `Lastv.py` وأعد الرفع على Railway")
+
+            if st.button("🚪 إغلاق الصفحة"):
+                st.query_params.clear()
+                st.rerun()
+
+            st.stop()
+    except Exception as _e:
+        st.error(f"❌ خطأ: {_e}")
+
+
     # ⭐ بوابة المشترك للموبايل ⭐
     try:
         if st.query_params.get("view") == "subscriber":
