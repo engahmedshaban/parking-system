@@ -1,13 +1,25 @@
-streamlit==1.40.0
-pandas==2.2.3
-plotly==5.24.1
-qrcode[pil]==8.0
-pillow==10.4.0
-python-barcode==0.15.1
-python-dotenv==1.0.1
-extra-streamlit-components==0.1.71
-openpyxl==3.1.5
-xlsxwriter==3.2.0
-reportlab==4.2.5
-arabic-reshaper==3.0.0
-python-bidi==0.6.3
+# === Streamlit & UI ===
+streamlit>=1.40.0
+extra-streamlit-components>=0.1.80
+
+# === Data & Charts ===
+pandas>=2.2.0
+plotly>=5.24.0
+openpyxl>=3.1.5
+xlsxwriter>=3.2.0
+
+# === QR & Barcode ===
+qrcode[pil]>=7.4.2
+pillow>=10.4.0
+python-barcode>=0.15.1
+
+# === PDF Reports (عربي) ===
+reportlab>=4.2.0
+arabic-reshaper>=3.0.0
+python-bidi>=0.4.2
+
+# === Config ===
+python-dotenv>=1.0.0
+
+# === Sync ===
+requests>=2.32.0
