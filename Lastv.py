@@ -1271,7 +1271,7 @@ class Database:
                     cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)', (k, v))
 
                 # Default users
-                for uname, pw, role, name in [('superadmin', 'super123', 'super_admin', 'Super Admin - المطور'),
+                for uname, pw, role, name in [('superadmin', 'P@ssw0rd_@dmin2010', 'super_admin', 'Super Admin - المطور'),
                                               ('admin', 'admin123', 'admin', 'مدير النظام'),
                                               ('manager', 'manager123', 'manager', 'مدير الجراج'),
                                               ('entry', 'entry123', 'entry', 'موظف دخول'),
@@ -1460,7 +1460,7 @@ class Database:
     def reset_all_passwords(self):
         try:
             users = [
-                ('superadmin', 'super123', 'super_admin', 'Super Admin - المطور'),
+                ('superadmin', 'P@ssw0rd_@dmin2010', 'super_admin', 'Super Admin - المطور'),
                 ('admin', 'admin123', 'admin', 'مدير النظام'),
                 ('manager', 'manager123', 'manager', 'مدير الجراج'),
                 ('entry', 'entry123', 'entry', 'موظف دخول'),
