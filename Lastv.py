@@ -304,6 +304,12 @@ def generate_qr_base64(data, color="#000000", box_size=6):
 
 def generate_barcode_base64(data, color="#000000"):
     if not BARCODE_AVAILABLE:
+        # ⭐ اعرض رسالة واضحة مكان الباركود
+        try:
+            import streamlit as st
+            st.session_state['_barcode_err'] = "BARCODE_AVAILABLE=False — مكتبة python-barcode مش مثبتة في هذا البايثون"
+        except Exception:
+            pass
         return ""
     try:
         from barcode import get_barcode_class
@@ -323,10 +329,18 @@ def generate_barcode_base64(data, color="#000000"):
         barcode_img.save(buffered, format="PNG")
         buffered.seek(0)
         return base64.b64encode(buffered.getvalue()).decode('utf-8')
-    except Exception:
+    except Exception as e:
+        import traceback
+        err = f"{type(e).__name__}: {e}"
+        print(f"❌ Barcode error: {err}")
+        traceback.print_exc()
+        # ⭐ احفظ الخطأ في session_state عشان يظهر على الشاشة
+        try:
+            import streamlit as st
+            st.session_state['_barcode_err'] = err
+        except Exception:
+            pass
         return ""
-
-
 def generate_qr_content_from_fields(fields):
     return "\n".join([f"{f['label']}: {f['value']}" for f in fields])
 

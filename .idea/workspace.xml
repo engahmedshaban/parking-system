@@ -37,23 +37,23 @@
 }</component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.0000144356940723" />
-      <entry key="MS500" value="1.1084821499803088" />
-      <entry key="S2" value="2.141287461997499" />
-      <entry key="S5" value="4.239330996985702" />
-      <entry key="S10" value="5.986605296909046" />
-      <entry key="S30" value="7.803321834854708" />
-      <entry key="S60" value="8.373387737097925" />
-      <entry key="M2" value="8.679258080809237" />
-      <entry key="M5" value="8.869869275644003" />
-      <entry key="M10" value="8.934624763181933" />
-      <entry key="M15" value="8.956347331833685" />
-      <entry key="M30" value="8.978138998104493" />
-      <entry key="H1" value="8.989065711680386" />
-      <entry key="H2" value="9.001630827351656" />
-      <entry key="H4" value="9.284509205981037" />
-      <entry key="D1" value="15.428911173283955" />
-      <entry key="W1" value="19.975973779270596" />
+      <entry key="MS100" value="1.1755556627423167" />
+      <entry key="MS500" value="1.787800586677268" />
+      <entry key="S2" value="3.8463895609991194" />
+      <entry key="S5" value="8.082567757894576" />
+      <entry key="S10" value="12.460906340561513" />
+      <entry key="S30" value="17.901421570133024" />
+      <entry key="S60" value="19.801654415101616" />
+      <entry key="M2" value="20.86026185962321" />
+      <entry key="M5" value="21.533907120463773" />
+      <entry key="M10" value="21.765242374826986" />
+      <entry key="M15" value="21.845035971780902" />
+      <entry key="M30" value="22.053819671707274" />
+      <entry key="H1" value="23.052527102199903" />
+      <entry key="H2" value="25.117598521831525" />
+      <entry key="H4" value="27.471354804356295" />
+      <entry key="D1" value="36.129854227546204" />
+      <entry key="W1" value="41.72664392044272" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
@@ -63,35 +63,35 @@
       <entry key="S10" value="0.0" />
       <entry key="S30" value="0.0" />
       <entry key="S60" value="0.0" />
-      <entry key="M2" value="7.15812902867456E-199" />
-      <entry key="M5" value="5.519755094630717E-80" />
-      <entry key="M10" value="2.3494159049922835E-40" />
-      <entry key="M15" value="3.8075002132486434E-27" />
-      <entry key="M30" value="6.170494480387E-14" />
-      <entry key="H1" value="2.484048002834687E-7" />
-      <entry key="H2" value="4.984022474703226E-4" />
-      <entry key="H4" value="0.022324924355310204" />
-      <entry key="D1" value="0.5306379819820163" />
-      <entry key="W1" value="0.9134514638225484" />
+      <entry key="M2" value="2.4483748342971076E-226" />
+      <entry key="M5" value="5.695753199332115E-91" />
+      <entry key="M10" value="7.547021398758655E-46" />
+      <entry key="M15" value="8.289284667278721E-31" />
+      <entry key="M30" value="9.104550877049748E-16" />
+      <entry key="H1" value="3.017374832043533E-8" />
+      <entry key="H2" value="1.7370592482824322E-4" />
+      <entry key="H4" value="0.013179754353865758" />
+      <entry key="D1" value="0.486016730239666" />
+      <entry key="W1" value="0.9020609619419377" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="0.0011941124115366904" />
-      <entry key="MS500" value="0.3028676266618641" />
-      <entry key="S2" value="1.726134477009995" />
-      <entry key="S5" value="4.026588342285236" />
-      <entry key="S10" value="5.868037353505009" />
-      <entry key="S30" value="7.760290983716151" />
-      <entry key="S60" value="8.351365464041299" />
-      <entry key="M2" value="8.668114177932926" />
-      <entry key="M5" value="8.865379030094031" />
-      <entry key="M10" value="8.932374122636116" />
-      <entry key="M15" value="8.954845673346055" />
-      <entry key="M30" value="8.977387551803629" />
-      <entry key="H1" value="8.988690081378895" />
-      <entry key="H2" value="9.001940220738362" />
-      <entry key="H4" value="9.30671707909028" />
-      <entry key="D1" value="15.959442175602044" />
-      <entry key="W1" value="20.889400547456557" />
+      <entry key="MS100" value="1.0315692315436213" />
+      <entry key="MS500" value="1.7427061247963498" />
+      <entry key="S2" value="3.823574753435256" />
+      <entry key="S5" value="8.06238801514289" />
+      <entry key="S10" value="12.444899645283757" />
+      <entry key="S30" value="17.8935903440523" />
+      <entry key="S60" value="19.79729615221848" />
+      <entry key="M2" value="20.857958603710337" />
+      <entry key="M5" value="21.532954098020696" />
+      <entry key="M10" value="21.764760399250342" />
+      <entry key="M15" value="21.844713106943445" />
+      <entry key="M30" value="22.05364669905487" />
+      <entry key="H1" value="23.052400377172145" />
+      <entry key="H2" value="25.117665766001878" />
+      <entry key="H4" value="27.48444515291157" />
+      <entry key="D1" value="36.61576958878151" />
+      <entry key="W1" value="42.62868001105736" />
     </decayedShown>
   </component>
   <component name="ProjectColorInfo">{
@@ -106,27 +106,28 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
-    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
-    &quot;com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1&quot;: &quot;true&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
-    &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;,
-    &quot;last_opened_file_path&quot;: &quot;D:/parking-web/parking/garages&quot;,
-    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
-    &quot;node.js.detected.package.jshint&quot;: &quot;true&quot;,
-    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
-    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
-    &quot;node.js.selected.package.jshint&quot;: &quot;&quot;,
-    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
-    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;to.speed.mode.migration.done&quot;: &quot;true&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "Python.run_app.executor": "Run",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+    "codeWithMe.voiceChat.enabledByDefault": "false",
+    "com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1": "true",
+    "git-widget-placeholder": "main",
+    "junie.onboarding.icon.badge.shown": "true",
+    "last_opened_file_path": "D:/parking-web/parking/garages",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.jshint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.jshint": "",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "to.speed.mode.migration.done": "true"
   }
-}</component>
+}]]></component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="D:\parking-web\parking\garages" />
@@ -149,14 +150,6 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1791387525635</updated>
-    </task>
-    <task id="LOCAL-00005" summary="commit">
-      <option name="closed" value="true" />
-      <created>1791407917494</created>
-      <option name="number" value="00005" />
-      <option name="presentableId" value="LOCAL-00005" />
-      <option name="project" value="LOCAL" />
-      <updated>1791407917494</updated>
     </task>
     <task id="LOCAL-00006" summary="commit">
       <option name="closed" value="true" />
@@ -542,7 +535,15 @@
       <option name="project" value="LOCAL" />
       <updated>1791722424176</updated>
     </task>
-    <option name="localTasksCounter" value="54" />
+    <task id="LOCAL-00054" summary="commit">
+      <option name="closed" value="true" />
+      <created>1791726971936</created>
+      <option name="number" value="00054" />
+      <option name="presentableId" value="LOCAL-00054" />
+      <option name="project" value="LOCAL" />
+      <updated>1791726971936</updated>
+    </task>
+    <option name="localTasksCounter" value="55" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
