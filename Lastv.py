@@ -22,7 +22,8 @@ import qrcode
 from io import BytesIO
 import base64
 from PIL import Image
-
+import os
+import sys
 # ⭐ تحميل .env
 try:
     from dotenv import load_dotenv
@@ -37,6 +38,27 @@ try:
 except ImportError:
     BARCODE_AVAILABLE = False
 
+# ⭐ مسار السكريبت الثابت
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ⭐ إجبار cwd على مسار السكريبت
+try:
+    os.chdir(_SCRIPT_DIR)
+except Exception:
+    pass
+
+# ⭐ .env من مسار السكريبت مش من cwd
+try:
+    from dotenv import load_dotenv
+    _env_path = os.path.join(_SCRIPT_DIR, '.env')
+    if os.path.exists(_env_path):
+        load_dotenv(_env_path, override=True)
+        print(f"✅ Loaded .env from: {_env_path}")
+    else:
+        load_dotenv()
+        print(f"⚠️ .env not found at: {_env_path}")
+except ImportError:
+    pass
 # ⭐ استيراد بوابة المشترك ⭐
 try:
     from subscriber_portal import subscriber_portal_page, show_app_payments
@@ -78,14 +100,15 @@ SESSION_VALIDITY_MINUTES = 30
 # ⭐⭐⭐ Railway Volume Support ⭐⭐⭐
 # ===================================================================
 def _get_base_data_dir():
-    """يرجع مسار التخزين الأساسي — مبني على مكان السكريبت مش الـ cwd"""
+    """يرجع مسار التخزين الأساسي — دايماً absolute path"""
 
-    # ⭐ 1) PARKING_DATA_DIR — الأفضل والأوضح
+    # ⭐ 1) PARKING_DATA_DIR
     custom = os.environ.get('PARKING_DATA_DIR')
     if custom:
         try:
-            os.makedirs(custom, exist_ok=True)
-            return custom
+            custom_abs = os.path.abspath(custom)
+            os.makedirs(custom_abs, exist_ok=True)
+            return custom_abs
         except Exception:
             pass
 
@@ -100,23 +123,25 @@ def _get_base_data_dir():
         except Exception:
             pass
 
-    # ⭐ 3) مجلد السكريبت نفسه — مش الـ cwd
-    try:
-        # Lastv.py موجود في مجلد المشروع
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        return script_dir
-    except Exception:
-        pass
+    # ⭐ 3) مجلد السكريبت (مش الـ cwd)
+    return _SCRIPT_DIR
 
-    # 4) Fallback أخير
-    return os.getcwd()
 def _get_db_path(filename):
-    """يبني مسار قاعدة بيانات صحيح"""
+    """يبني مسار قاعدة بيانات صحيح — ABSOLUTE"""
     base = _get_base_data_dir()
-    if base == '/data':
-        return os.path.join('/data', filename)
-    return filename
+    return os.path.join(base, filename)   # ⭐ دايماً join
 
+
+def _get_garages_dir():
+    """يرجع مسار مجلد الجراجات — ABSOLUTE"""
+    base = _get_base_data_dir()
+    return os.path.join(base, 'garages')  # ⭐ دايماً join
+
+
+def _get_logs_dir():
+    """يرجع مسار مجلد اللوجات — ABSOLUTE"""
+    base = _get_base_data_dir()
+    return os.path.join(base, 'logs')     # ⭐ دايماً join
 
 def _get_garages_dir():
     """يرجع مسار مجلد الجراجات"""
@@ -312,13 +337,11 @@ def generate_qr_base64(data, color="#000000", box_size=6):
     except Exception:
         return ""
 
-
 def generate_barcode_base64(data, color="#000000"):
     if not BARCODE_AVAILABLE:
-        # ⭐ اعرض رسالة واضحة مكان الباركود
         try:
             import streamlit as st
-            st.session_state['_barcode_err'] = "BARCODE_AVAILABLE=False — مكتبة python-barcode مش مثبتة في هذا البايثون"
+            st.session_state['_barcode_err'] = "BARCODE_AVAILABLE = False — المكتبة مش محمّلة"
         except Exception:
             pass
         return ""
@@ -339,16 +362,23 @@ def generate_barcode_base64(data, color="#000000"):
         buffered = BytesIO()
         barcode_img.save(buffered, format="PNG")
         buffered.seek(0)
-        return base64.b64encode(buffered.getvalue()).decode('utf-8')
-    except Exception as e:
-        import traceback
-        err = f"{type(e).__name__}: {e}"
-        print(f"❌ Barcode error: {err}")
-        traceback.print_exc()
-        # ⭐ احفظ الخطأ في session_state عشان يظهر على الشاشة
+        result = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        # ⭐ سجّل نجاح
         try:
             import streamlit as st
-            st.session_state['_barcode_err'] = err
+            st.session_state['_barcode_ok'] = f"OK | {len(result)} chars | data={data_str}"
+            st.session_state.pop('_barcode_err', None)
+        except Exception:
+            pass
+        return result
+    except Exception as e:
+        import traceback
+        err_msg = f"{type(e).__name__}: {e}"
+        print(f"❌ Barcode error: {err_msg}")
+        traceback.print_exc()
+        try:
+            import streamlit as st
+            st.session_state['_barcode_err'] = err_msg
         except Exception:
             pass
         return ""
@@ -671,8 +701,14 @@ def generate_receipt_html(title, fields, qr_data=None, barcode_data=None, footer
     if barcode_data:
         b64 = generate_barcode_base64(barcode_data)
         if b64:
-            barcode_html = f'<div style="text-align:center; margin:4px 0;"><img src="data:image/png;base64,{b64}" style="width:100%; max-width:300px;"></div>'
-
+            barcode_html = f'<div style="text-align:center; margin:6px 0;"><img src="data:image/png;base64,{b64}" style="width:100%; max-width:320px; height:auto; display:block; margin:0 auto;"></div>'
+        else:
+            # ⭐ لو فشل الباركود — اعرض الرقم كنص بأنماط
+            barcode_html = f'''<div style="text-align:center; margin:8px 0; padding:8px; 
+                                          border:2px solid #000; font-family:monospace; 
+                                          letter-spacing:3px; font-size:16px; font-weight:bold;">
+                {barcode_data}
+            </div>'''
     return f"""
     <div style="background: white; direction: rtl; font-family: 'Arial', sans-serif; max-width: {paper_width}mm; margin: 0 auto; padding: 2mm; font-size: 11px;">
         <div style="text-align:center; border-bottom:2px solid #000; padding-bottom:3px; margin-bottom:3px;">
@@ -697,27 +733,42 @@ def generate_receipt_html(title, fields, qr_data=None, barcode_data=None, footer
 
 def display_receipt_with_buttons(title, fields, qr_data=None, barcode_data=None,
                                   footer_text=None, db=None, movement_number=None):
+    # ⭐ امسح أي حالة قديمة
+    for k in ['_barcode_err', '_barcode_ok']:
+        st.session_state.pop(k, None)
+
     paper_width = get_paper_width_from_settings(db) if db else 80
     html = generate_receipt_html(
         title, fields, qr_data, barcode_data, footer_text,
         paper_width=paper_width, movement_number=movement_number
     )
 
-    # ⭐ احسب الارتفاع حسب المحتوى
     height = 550
     if qr_data is not None or (qr_data is None and fields):
-        height += 130      # QR
+        height += 130
     if barcode_data:
-        height += 200      # باركود
+        height += 200
     if movement_number is not None:
-        height += 30       # رقم الحركة
+        height += 30
     height = min(height, 1100)
 
-    components.html(html, height=height, scrolling=True)   # ← scrolling=True للأمان
+    components.html(html, height=height, scrolling=True)
+
+    # ⭐ اعرض حالة الباركود
+    _bc_err = st.session_state.get('_barcode_err')
+    _bc_ok = st.session_state.get('_barcode_ok')
+    if _bc_err:
+        st.error(f"🔴 مشكلة الباركود: {_bc_err}")
+    elif _bc_ok and barcode_data:
+        st.success(f"✅ الباركود اشتغل: {_bc_ok}")
+    elif barcode_data and not _bc_ok:
+        st.warning("⚠️ الباركود مش اتولّد ولا فيه خطأ — يمكن BARCODE_AVAILABLE=False")
 
     st.markdown("---")
     if st.button("✖ إغلاق الإيصال", use_container_width=True, key="close_receipt_btn"):
         st.session_state.pop('receipt_data', None)
+        for k in ['_barcode_err', '_barcode_ok']:
+            st.session_state.pop(k, None)
         st.rerun()
 
 # ===================================================================
@@ -1168,19 +1219,19 @@ class GarageRegistry:
 # ===================================================================
 class Database:
     def __init__(self, db_path='garage.db'):
-        # ⭐ Railway Volume Support
-        base = _get_base_data_dir()
-        if base == '/data':
-            if not db_path.startswith('/data'):
-                if db_path.startswith('garages/'):
-                    db_path = os.path.join('/data', db_path)
-                else:
-                    db_path = os.path.join('/data', db_path)
+        # ⭐ لو المسار نسبي — اعمل join مع base
+        if not os.path.isabs(db_path):
+            base = _get_base_data_dir()
+            db_path = os.path.join(base, db_path)
 
         self.db_path = db_path
         d = os.path.dirname(db_path)
         if d:
             os.makedirs(d, exist_ok=True)
+
+        # ⭐ اطبع المسار الفعلي عشان تشوفه في اللوج
+        print(f"✅ Database initialized at: {self.db_path}")
+
         self.init_db()
 
     @contextmanager
