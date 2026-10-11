@@ -3635,7 +3635,7 @@ def show_garage_view(manager, visitor_manager):
                                 st.session_state['receipt_data'] = {
                                     'title': "🅿️ إيصال دخول (إعادة طباعة)",
                                     'fields': fields,
-                                    'qr_data': None,
+                                    'qr_data': visitor['ticket_number'],  # ⭐
                                     'barcode_data': visitor['ticket_number'],
                                     'footer_text': "إعادة طباعة - احتفظ بالإيصال",
                                     'movement_number': visitor.get('movement_number')
@@ -4193,7 +4193,7 @@ def entry_page(manager, visitor_manager, attendance_manager):
                                 st.session_state.pop('selected_entry_spot', None)
                             st.session_state['receipt_data'] = {
                                 'title': "🅿️ إيصال دخول", 'fields': fields,
-                                'qr_data': None, 'barcode_data': ticket,
+                                'qr_data': ticket, 'barcode_data': ticket,  # ⭐ QR = رقم التذكرة
                                 'footer_text': "احتفظ بالإيصال", 'movement_number': mv
                             }
                             st.rerun()
@@ -4313,7 +4313,7 @@ def exit_page(manager, visitor_manager, attendance_manager):
                                 footer = "تم الدفع"
                             st.session_state['receipt_data'] = {
                                 'title': title, 'fields': fields,
-                                'qr_data': None, 'barcode_data': r['ticket_number'],
+                                'qr_data': r['ticket_number'], 'barcode_data': r['ticket_number'],  # ⭐
                                 'footer_text': footer,
                                 'movement_number': r.get('movement_number')
                             }
