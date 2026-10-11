@@ -3303,13 +3303,7 @@ def manage_users(db):
                         elif db.delete_user(int(sel)):
                             st.success("✅")
                             st.rerun()
-                with c2:
-                    if st.form_submit_button("🗑️ حذف"):
-                        if su['username'] == 'admin':
-                            st.error("❌ لا يمكن حذف المدير")
-                        elif db.delete_user(int(sel)):
-                            st.success("✅")
-                            st.rerun()
+
 
 
 # ===================================================================
