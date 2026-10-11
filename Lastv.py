@@ -1286,15 +1286,19 @@ class Database:
                     cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)', (k, v))
 
                 # Default users
-                for uname, pw, role, name in [('superadmin', 'P@ssw0rd_@dmin2010', 'super_admin', 'Super Admin - المطور'),
-                                              ('admin', 'admin123', 'admin', 'مدير النظام'),
-                                              ('manager', 'manager123', 'manager', 'مدير الجراج'),
-                                              ('entry', 'entry123', 'entry', 'موظف دخول'),
-                                              ('exit', 'exit123', 'exit', 'موظف خروج'),
-                                              ('subscriber', 'sub123', 'subscriber', 'موظف المشتركين')]:
+                # Default users
+                for uname, pw, role, name in [
+                    ('superadmin', 'P@ssw0rd_@dmin', 'super_admin', 'Super Admin - المطور'),  # ⭐ الباسورد الجديد
+                    ('admin', 'admin123', 'admin', 'مدير النظام'),
+                    ('manager', 'manager123', 'manager', 'مدير الجراج'),
+                    ('entry', 'entry123', 'entry', 'موظف دخول'),
+                    ('exit', 'exit123', 'exit', 'موظف خروج'),
+                    ('subscriber', 'sub123', 'subscriber', 'موظف المشتركين')
+                ]:
                     hashed = hashlib.sha256(pw.encode()).hexdigest()
-                    cursor.execute('INSERT OR IGNORE INTO users (username, password, role, full_name) VALUES (?, ?, ?, ?)',
-                                   (uname, hashed, role, name))
+                    cursor.execute(
+                        'INSERT OR IGNORE INTO users (username, password, role, full_name) VALUES (?, ?, ?, ?)',
+                        (uname, hashed, role, name))
 
                 # ⭐ Migration: Sync Support
                 for table, col, typ in [
@@ -1451,6 +1455,17 @@ class Database:
 
     def update_user(self, user_id, **kwargs):
         try:
+            # ⭐ الحماية: super admin ما يتغيرش إلا من super admin
+            current_role = st.session_state.get('user_role', '')
+            if current_role != 'super_admin':
+                # امنع ترقية حد لـ super_admin
+                if kwargs.get('role') == 'super_admin':
+                    return False
+                # امنع تعديل super_admin موجود
+                existing = self.execute_query('SELECT role FROM users WHERE id=?', (user_id,), fetch=True)
+                if existing and existing[0]['role'] == 'super_admin':
+                    return False
+
             updates, params = [], []
             if kwargs.get('username'):
                 updates.append("username=?")
@@ -1474,15 +1489,14 @@ class Database:
 
             self.execute_query(f"UPDATE users SET {', '.join(updates)} WHERE id=?", params, commit=True)
 
-            # ⭐ سجّل للتزامن
             log_change(self, 'users', user_id, 'update', {
-                'id': user_id, 'updated_at': now, **kwargs
+                'id': user_id, 'updated_at': now,
+                **{k: v for k, v in kwargs.items() if k != 'password'}
             })
             return True
         except Exception as e:
             app_log("error", f"update_user: {e}")
             return False
-
     def add_user(self, username, password, role, full_name):
         try:
             hashed = hashlib.sha256(password.encode()).hexdigest()
@@ -1511,7 +1525,7 @@ class Database:
     def reset_all_passwords(self):
         try:
             users = [
-                ('superadmin', 'P@ssw0rd_@dmin2010', 'super_admin', 'Super Admin - المطور'),
+                ('superadmin', 'P@ssw0rd_@dmin', 'super_admin', 'Super Admin - المطور'),  # ⭐
                 ('admin', 'admin123', 'admin', 'مدير النظام'),
                 ('manager', 'manager123', 'manager', 'مدير الجراج'),
                 ('entry', 'entry123', 'entry', 'موظف دخول'),
@@ -1534,13 +1548,10 @@ class Database:
                     self.execute_query(
                         'INSERT INTO users (username, password, role, full_name, updated_at) VALUES (?, ?, ?, ?, ?)',
                         (uname, hashed, role, name, now), commit=True)
-                    log_change(self, 'users', uname, 'insert',
-                               {'username': uname, 'role': role, 'full_name': name, 'updated_at': now})
                     results.append(f"➕ تم إضافة: {uname} | كلمة المرور: {pw}")
             return results
         except Exception as e:
             return [f"❌ خطأ: {e}"]
-
     def open_shift(self, username):
         try:
             if self.get_current_shift():
@@ -3226,7 +3237,12 @@ def manage_users(db):
                 fn = st.text_input("الاسم الكامل")
             with c2:
                 p = st.text_input("كلمة المرور", type="password")
-                r = st.selectbox("الدور", ['admin', 'manager', 'entry', 'exit', 'subscriber'])
+                # ⭐ قائمة الأدوار حسب الصلاحية
+                if st.session_state.get('user_role') == 'super_admin':
+                    all_roles = ['admin', 'manager', 'entry', 'exit', 'subscriber', 'super_admin']
+                else:
+                    all_roles = ['admin', 'manager', 'entry', 'exit', 'subscriber']
+                r = st.selectbox("الدور", all_roles)
             if st.form_submit_button("إضافة"):
                 if u and p and db.add_user(u, p, r, fn):
                     st.success("✅")
@@ -3238,8 +3254,17 @@ def manage_users(db):
         sel = st.selectbox("اختر", list(opts.keys()), format_func=lambda x: opts[x])
         if sel:
             su = [u for u in ul if str(u['id']) == sel][0]
-            if su['username'] == 'superadmin':
-                st.warning("⚠️ حساب Super Admin محمي - لا يمكن تعديله من هنا")
+            current_role = st.session_state.get('user_role', '')
+            is_super = current_role == 'super_admin'
+
+            # ⭐ الحماية: super admin ما يتعدلش إلا من super_admin تاني
+            if su['role'] == 'super_admin' and not is_super:
+                st.warning("⚠️ حساب Super Admin محمي - لا يمكن تعديله إلا من Super Admin")
+                return
+
+            # ⭐ الحماية: ما يحذفش آخر super admin
+            if su['username'] == 'superadmin' and not is_super:
+                st.error("❌ لا يمكن تعديل حساب superadmin")
                 return
             with st.form("edit_user"):
                 c1, c2 = st.columns(2)
@@ -3248,8 +3273,15 @@ def manage_users(db):
                     ef = st.text_input("الاسم الكامل", value=su['full_name'] or '')
                 with c2:
                     ep = st.text_input("كلمة مرور جديدة", type="password")
-                    er = st.selectbox("الدور", ['admin', 'manager', 'entry', 'exit', 'subscriber'],
-                                      index=['admin', 'manager', 'entry', 'exit', 'subscriber'].index(su['role']) if su['role'] in ['admin', 'manager', 'entry', 'exit', 'subscriber'] else 0)
+                    # ⭐ قائمة الأدوار حسب الصلاحية
+                    if st.session_state.get('user_role') == 'super_admin':
+                        all_roles = ['admin', 'manager', 'entry', 'exit', 'subscriber', 'super_admin']
+                    else:
+                        all_roles = ['admin', 'manager', 'entry', 'exit', 'subscriber']
+
+                    current_idx = all_roles.index(su['role']) if su['role'] in all_roles else 0
+                    er = st.selectbox("الدور", all_roles, index=current_idx)
+
                 c1, c2 = st.columns(2)
                 with c1:
                     if st.form_submit_button("💾 حفظ"):
@@ -3259,6 +3291,16 @@ def manage_users(db):
                         if ep: ups['password'] = ep
                         if er != su['role']: ups['role'] = er
                         if ups and db.update_user(int(sel), **ups):
+                            st.success("✅")
+                            st.rerun()
+                with c2:
+                    if st.form_submit_button("🗑️ حذف"):
+                        # ⭐ حماية إضافية
+                        if su['role'] == 'super_admin' and st.session_state.get('user_role') != 'super_admin':
+                            st.error("❌ لا يمكن حذف Super Admin")
+                        elif su['username'] == 'superadmin':
+                            st.error("❌ لا يمكن حذف حساب superadmin الأساسي")
+                        elif db.delete_user(int(sel)):
                             st.success("✅")
                             st.rerun()
                 with c2:
