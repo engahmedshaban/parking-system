@@ -78,8 +78,9 @@ SESSION_VALIDITY_MINUTES = 30
 # ⭐⭐⭐ Railway Volume Support ⭐⭐⭐
 # ===================================================================
 def _get_base_data_dir():
-    """يرجع مسار التخزين الأساسي — Volume على Railway أو المجلد الحالي"""
-    # ⭐ جديد: مجلد بيانات مخصص (نسخة الويندوز)
+    """يرجع مسار التخزين الأساسي — مبني على مكان السكريبت مش الـ cwd"""
+
+    # ⭐ 1) PARKING_DATA_DIR — الأفضل والأوضح
     custom = os.environ.get('PARKING_DATA_DIR')
     if custom:
         try:
@@ -87,6 +88,8 @@ def _get_base_data_dir():
             return custom
         except Exception:
             pass
+
+    # ⭐ 2) Railway Volume
     if os.path.exists('/data') and os.path.isdir('/data'):
         try:
             test_file = os.path.join('/data', '.write_test')
@@ -96,9 +99,17 @@ def _get_base_data_dir():
             return '/data'
         except Exception:
             pass
-    return '.'
 
+    # ⭐ 3) مجلد السكريبت نفسه — مش الـ cwd
+    try:
+        # Lastv.py موجود في مجلد المشروع
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        return script_dir
+    except Exception:
+        pass
 
+    # 4) Fallback أخير
+    return os.getcwd()
 def _get_db_path(filename):
     """يبني مسار قاعدة بيانات صحيح"""
     base = _get_base_data_dir()
