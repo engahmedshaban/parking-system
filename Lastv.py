@@ -670,15 +670,30 @@ def generate_receipt_html(title, fields, qr_data=None, barcode_data=None, footer
     """
 
 
-def display_receipt_with_buttons(title, fields, qr_data=None, barcode_data=None, footer_text=None, db=None, movement_number=None):
+def display_receipt_with_buttons(title, fields, qr_data=None, barcode_data=None,
+                                  footer_text=None, db=None, movement_number=None):
     paper_width = get_paper_width_from_settings(db) if db else 80
-    html = generate_receipt_html(title, fields, qr_data, barcode_data, footer_text, paper_width=paper_width, movement_number=movement_number)
-    components.html(html, height=550, scrolling=False)
+    html = generate_receipt_html(
+        title, fields, qr_data, barcode_data, footer_text,
+        paper_width=paper_width, movement_number=movement_number
+    )
+
+    # ⭐ احسب الارتفاع حسب المحتوى
+    height = 550
+    if qr_data is not None or (qr_data is None and fields):
+        height += 130      # QR
+    if barcode_data:
+        height += 200      # باركود
+    if movement_number is not None:
+        height += 30       # رقم الحركة
+    height = min(height, 1100)
+
+    components.html(html, height=height, scrolling=True)   # ← scrolling=True للأمان
+
     st.markdown("---")
     if st.button("✖ إغلاق الإيصال", use_container_width=True, key="close_receipt_btn"):
         st.session_state.pop('receipt_data', None)
         st.rerun()
-
 
 # ===================================================================
 # ⭐⭐⭐ نظام صلاحية النظام (License) ⭐⭐⭐
@@ -699,17 +714,17 @@ def is_system_expired(db):
 
 def set_system_expiry(db, expiry_date):
     try:
-        if expiry_date is None:
-            db.execute_query("INSERT OR REPLACE INTO parking_settings (key, value) VALUES ('system_expiry_date', '')", commit=True)
-        else:
-            db.execute_query("INSERT OR REPLACE INTO parking_settings (key, value) VALUES ('system_expiry_date', ?)",
-                             (expiry_date.isoformat(),), commit=True)
+        now = datetime.now().isoformat()
+        val = expiry_date.isoformat() if expiry_date else ''
+        db.execute_query(
+            "INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES ('system_expiry_date', ?, ?)",
+            (val, now), commit=True)
+        log_change(db, 'parking_settings', 'system_expiry_date', 'update',
+                   {'key': 'system_expiry_date', 'value': val, 'updated_at': now})
         return True
     except Exception as e:
-        app_log("error", f"فشل ضبط تاريخ الانتهاء: {e}")
+        app_log("error", f"set_system_expiry: {e}")
         return False
-
-
 # ===================================================================
 # ⭐⭐⭐ فحص اشتراك التطبيق + إدارة الجلسات ⭐⭐⭐
 # ===================================================================
@@ -1295,7 +1310,10 @@ class Database:
                     ('subscribers', 'app_service_disabled', 'INTEGER DEFAULT 0'),
                     ('subscribers', 'updated_at', 'TEXT'),      # ⭐ Sync
                     ('visitors', 'updated_at', 'TEXT'),          # ⭐ Sync
-                    ('spots', 'updated_at', 'TEXT'),             # ⭐ Sync
+                    ('spots', 'updated_at', 'TEXT'),
+                    ('users', 'updated_at', 'TEXT'),  # ⭐
+                    ('parking_settings', 'updated_at', 'TEXT'),  # ⭐
+                    # ⭐ Sync
                 ]:
                     cursor.execute(f"PRAGMA table_info({table})")
                     cols = [c[1] for c in cursor.fetchall()]
@@ -1342,12 +1360,16 @@ class Database:
 
     def set_garage_name(self, name):
         try:
-            self.execute_query("INSERT OR REPLACE INTO parking_settings (key, value) VALUES ('garage_name', ?)",
-                               (name or DEFAULT_GARAGE_NAME,), commit=True)
+            now = datetime.now().isoformat()
+            val = name or DEFAULT_GARAGE_NAME
+            self.execute_query(
+                "INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES ('garage_name', ?, ?)",
+                (val, now), commit=True)
+            log_change(self, 'parking_settings', 'garage_name', 'update',
+                       {'key': 'garage_name', 'value': val, 'updated_at': now})
             return True
         except Exception:
             return False
-
     def get_garage_structure(self):
         try:
             result = self.execute_query("SELECT value FROM parking_settings WHERE key='garage_structure'", fetch=True)
@@ -1373,11 +1395,16 @@ class Database:
         try:
             serializable = {str(f): {str(l): v for l, v in levels.items()}
                             for f, levels in structure.items()}
-            self.execute_query("INSERT OR REPLACE INTO parking_settings (key, value) VALUES ('garage_structure', ?)",
-                               (json.dumps(serializable, ensure_ascii=False),), commit=True)
+            now = datetime.now().isoformat()
+            val = json.dumps(serializable, ensure_ascii=False)
+            self.execute_query(
+                "INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES ('garage_structure', ?, ?)",
+                (val, now), commit=True)
+            log_change(self, 'parking_settings', 'garage_structure', 'update',
+                       {'key': 'garage_structure', 'value': val, 'updated_at': now})
             return True
         except Exception as e:
-            app_log("error", f"فشل حفظ هيكل الجراج: {e}")
+            app_log("error", f"set_garage_structure: {e}")
             return False
 
     def get_floor_names(self):
@@ -1393,12 +1420,16 @@ class Database:
     def set_floor_names(self, names):
         try:
             serializable = {str(k): v for k, v in names.items()}
-            self.execute_query("INSERT OR REPLACE INTO parking_settings (key, value) VALUES ('garage_floor_names', ?)",
-                               (json.dumps(serializable, ensure_ascii=False),), commit=True)
+            now = datetime.now().isoformat()
+            val = json.dumps(serializable, ensure_ascii=False)
+            self.execute_query(
+                "INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES ('garage_floor_names', ?, ?)",
+                (val, now), commit=True)
+            log_change(self, 'parking_settings', 'garage_floor_names', 'update',
+                       {'key': 'garage_floor_names', 'value': val, 'updated_at': now})
             return True
         except Exception:
             return False
-
     # ============ المستخدمين ============
     def get_user(self, username, password):
         try:
@@ -1418,22 +1449,6 @@ class Database:
         except Exception:
             return []
 
-    def add_user(self, username, password, role, full_name):
-        try:
-            hashed = hashlib.sha256(password.encode()).hexdigest()
-            self.execute_query('INSERT INTO users (username, password, role, full_name) VALUES (?, ?, ?, ?)',
-                               (username, hashed, role, full_name), commit=True)
-            return True
-        except Exception:
-            return False
-
-    def delete_user(self, user_id):
-        try:
-            self.execute_query('DELETE FROM users WHERE id=?', (user_id,), commit=True)
-            return True
-        except Exception:
-            return False
-
     def update_user(self, user_id, **kwargs):
         try:
             updates, params = [], []
@@ -1451,8 +1466,44 @@ class Database:
                 params.append(kwargs['role'])
             if not updates:
                 return False
+
+            now = datetime.now().isoformat()
+            updates.append("updated_at=?")
+            params.append(now)
             params.append(user_id)
+
             self.execute_query(f"UPDATE users SET {', '.join(updates)} WHERE id=?", params, commit=True)
+
+            # ⭐ سجّل للتزامن
+            log_change(self, 'users', user_id, 'update', {
+                'id': user_id, 'updated_at': now, **kwargs
+            })
+            return True
+        except Exception as e:
+            app_log("error", f"update_user: {e}")
+            return False
+
+    def add_user(self, username, password, role, full_name):
+        try:
+            hashed = hashlib.sha256(password.encode()).hexdigest()
+            now = datetime.now().isoformat()
+            self.execute_query(
+                'INSERT INTO users (username, password, role, full_name, updated_at) VALUES (?, ?, ?, ?, ?)',
+                (username, hashed, role, full_name, now), commit=True)
+
+            row = self.execute_query('SELECT id FROM users WHERE username=?', (username,), fetch=True)
+            if row:
+                log_change(self, 'users', row[0]['id'], 'insert',
+                           {'id': row[0]['id'], 'username': username, 'role': role,
+                            'full_name': full_name, 'updated_at': now})
+            return True
+        except Exception:
+            return False
+
+    def delete_user(self, user_id):
+        try:
+            self.execute_query('DELETE FROM users WHERE id=?', (user_id,), commit=True)
+            log_change(self, 'users', user_id, 'delete', None)  # ⭐
             return True
         except Exception:
             return False
@@ -1468,16 +1519,23 @@ class Database:
                 ('subscriber', 'sub123', 'subscriber', 'موظف المشتركين'),
             ]
             results = []
+            now = datetime.now().isoformat()
             for uname, pw, role, name in users:
                 hashed = hashlib.sha256(pw.encode()).hexdigest()
                 existing = self.execute_query('SELECT id FROM users WHERE username=?', (uname,), fetch=True)
                 if existing:
-                    self.execute_query('UPDATE users SET password=?, role=?, full_name=? WHERE username=?',
-                                       (hashed, role, name, uname), commit=True)
+                    self.execute_query(
+                        'UPDATE users SET password=?, role=?, full_name=?, updated_at=? WHERE username=?',
+                        (hashed, role, name, now, uname), commit=True)
+                    log_change(self, 'users', existing[0]['id'], 'update',
+                               {'id': existing[0]['id'], 'password_changed': True, 'updated_at': now})
                     results.append(f"✅ تم تحديث: {uname} | كلمة المرور: {pw}")
                 else:
-                    self.execute_query('INSERT INTO users (username, password, role, full_name) VALUES (?, ?, ?, ?)',
-                                       (uname, hashed, role, name), commit=True)
+                    self.execute_query(
+                        'INSERT INTO users (username, password, role, full_name, updated_at) VALUES (?, ?, ?, ?, ?)',
+                        (uname, hashed, role, name, now), commit=True)
+                    log_change(self, 'users', uname, 'insert',
+                               {'username': uname, 'role': role, 'full_name': name, 'updated_at': now})
                     results.append(f"➕ تم إضافة: {uname} | كلمة المرور: {pw}")
             return results
         except Exception as e:
@@ -1560,12 +1618,17 @@ def get_parking_settings(db):
 
 def update_parking_settings(db, settings):
     try:
+        now = datetime.now().isoformat()
         for k, v in settings.items():
-            db.execute_query('UPDATE parking_settings SET value=? WHERE key=?', (v, k), commit=True)
+            db.execute_query(
+                'UPDATE parking_settings SET value=?, updated_at=? WHERE key=?',
+                (v, now, k), commit=True)
+            log_change(db, 'parking_settings', k, 'update',
+                       {'key': k, 'value': v, 'updated_at': now})
         return True
-    except Exception:
+    except Exception as e:
+        app_log("error", f"update_parking_settings: {e}")
         return False
-# ===================================================================
 # ⭐⭐⭐ Sync Support ⭐⭐⭐
 # ===================================================================
 SYNC_MODE = os.environ.get('SYNC_MODE', 'local')
@@ -1964,14 +2027,8 @@ class GarageManager:
     def get_subscriber(self, sid):
         result = self.db.execute_query('SELECT * FROM subscribers WHERE id=?', (sid,), fetch=True)
         if result:
-            row = result[0]
-            return {'id': row[0], 'name': row[1], 'workplace': row[2], 'car_number': row[3],
-                    'car_type': row[4], 'car_color': row[5], 'phone': row[6],
-                    'subscription_type': row[7], 'subscription_start': row[8], 'subscription_end': row[9],
-                    'payment_amount': row[10], 'payment_status': row[11], 'status': row[12],
-                    'spot_id': row[13], 'registration_date': row[14], 'assigned_date': row[15]}
+            return dict(result[0])  # ⭐ كل الأعمدة
         return None
-
     def get_subscriber_by_car_number(self, car):
         result = self.db.execute_query('SELECT * FROM subscribers WHERE car_number=?', (car,), fetch=True)
         return dict(result[0]) if result else None
@@ -1986,13 +2043,7 @@ class GarageManager:
         result = self.db.execute_query(
             'SELECT * FROM subscribers WHERE name LIKE ? OR car_number LIKE ? OR phone LIKE ? OR id LIKE ? OR car_type LIKE ?',
             (q, q, q, q, q), fetch=True)
-        if result:
-            return [{'id': r[0], 'name': r[1], 'workplace': r[2], 'car_number': r[3],
-                     'car_type': r[4], 'car_color': r[5], 'phone': r[6],
-                     'subscription_type': r[7], 'subscription_start': r[8], 'subscription_end': r[9],
-                     'payment_amount': r[10], 'payment_status': r[11], 'status': r[12],
-                     'spot_id': r[13], 'registration_date': r[14], 'assigned_date': r[15]} for r in result]
-        return []
+        return [dict(r) for r in result] if result else []
 
     def get_floor_summary(self, floor=None):
         rows = get_cached_floor_summary(self.db.db_path)
@@ -2820,11 +2871,13 @@ def _render_app_fee_config(db):
                 'garage_free_forever': '1' if new_free_forever else '0',
                 'garage_free_until': free_until_date.isoformat() if (use_free_until and not new_free_forever) else '',
             }
+            now = datetime.now().isoformat()
             for k, v in updates.items():
                 db.execute_query(
-                    "INSERT OR REPLACE INTO parking_settings (key, value) VALUES (?, ?)",
-                    (k, v), commit=True
-                )
+                    "INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES (?, ?, ?)",
+                    (k, v, now), commit=True)
+                log_change(db, 'parking_settings', k, 'update',
+                           {'key': k, 'value': v, 'updated_at': now})
             st.success("✅ تم الحفظ")
             time.sleep(0.5)
             st.rerun()
@@ -4128,8 +4181,13 @@ def entry_page(manager, visitor_manager, attendance_manager):
                     st.warning("⚠️ لا يوجد مكان ركنة مخصص لهذا المشترك")
 
                 # ⭐ فحص اشتراك التطبيق
-                if not is_subscriber_app_active(sub):
-                    st.error("❌ **اشتراكك في التطبيق منتهي أو غير مفعّل**")
+                # ⭐ فحص اشتراك التطبيق
+                status, days, msg = get_subscriber_app_status(manager.db, sub)
+
+                if status == 'disabled':
+                    st.error(f"⛔ {msg}")
+                elif status == 'expired':
+                    st.error(f"❌ {msg}")
                     st.warning("💡 يجب دفع اشتراك استخدام التطبيق أولاً")
                     st.info(f"👉 **حوّل {APP_FEE_DEFAULT:.0f} جنيه عبر InstaPay إلى:** `{INSTAPAY_NUMBER}`")
                 else:
@@ -4138,7 +4196,8 @@ def entry_page(manager, visitor_manager, attendance_manager):
                         st.success(f"🕐 **وقت الدخول الحالي:** {current_att['entry_time'][:16]}")
                         st.info("🟢 داخل بالفعل")
                     else:
-                        if sub.get('subscription_end') and datetime.fromisoformat(sub['subscription_end']) < datetime.now():
+                        if sub.get('subscription_end') and datetime.fromisoformat(
+                                sub['subscription_end']) < datetime.now():
                             st.error("⚠️ اشتراك الجراج منتهي!")
                         else:
                             if st.button("📥 تسجيل دخول", key="entry_sub_btn", use_container_width=True):
@@ -4148,7 +4207,6 @@ def entry_page(manager, visitor_manager, attendance_manager):
                                     st.rerun()
                                 else:
                                     st.error("❌ فشل - تحقق من اشتراك التطبيق")
-
 # ===================================================================
 # ⭐⭐⭐ صفحة الخروج ⭐⭐⭐
 # ===================================================================
@@ -5273,14 +5331,14 @@ def main():
         if expiry_dt:
             st.markdown("---")
             if expired:
+                # ⭐ بتظهر بس لما الترخيص ينتهي فعلاً
                 st.error(f"🔒 الترخيص منتهي\n{expiry_dt.strftime('%Y-%m-%d')}")
             else:
                 days_left = (expiry_dt - datetime.now()).days
                 if days_left <= 14:
+                    # ⭐ تحذير قبل الانتهاء بشهرين بس
                     st.warning(f"⏰ الترخيص: {days_left} يوم")
-                else:
-                    st.info(f"✅ الترخيص ساري\n{expiry_dt.strftime('%Y-%m-%d')}")
-
+                # else: مش بنعرض حاجة لما يكون ساري
         st.markdown("---")
 
         if st.button("🚪 تسجيل الخروج", use_container_width=True, key="logout"):
