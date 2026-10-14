@@ -1,7 +1,7 @@
 # ===================================================================
 # Lastv.py — نظام إدارة الجراج المتكامل
 # النسخة النهائية: Multi-Garage + Railway Volume + Session Security
-# المطور: مهندس أحمد شعبان — 01095387792
+# المطور: رائد/ أحمد شعبان — 01095387792
 # ===================================================================
 import streamlit as st
 import streamlit.components.v1 as components
@@ -89,13 +89,15 @@ try:
 except ImportError:
     PDF_AVAILABLE = False
 # ===================== بيانات المطور =====================
-DEVELOPER_NAME = "مهندس أحمد شعبان"
+DEVELOPER_NAME = "رائد/ أحمد شعبان"
 DEVELOPER_PHONE = "01095387792"
-INSTAPAY_NUMBER = "ahmedibrahimshaban92@instapay"
 APP_FEE_DEFAULT = 10.0
 SESSION_VALIDITY_MINUTES = 30
 
-
+# ⭐⭐⭐ SuperAdmin Hardcoded — مش في الداتابيز ⭐⭐⭐
+# ⭐ الـ hash فقط — مستحيل ترجع الباسورد الأصلي
+SUPERADMIN_USERNAME = "Superadmin"
+SUPERADMIN_PASSWORD_HASH = "$2b$12$K8yZ9pQ3vN6mH4xL7wR2OeYq1tJcVbUf5rDgX8sP0nA3zM9kE7iWh"
 # ===================================================================
 # ⭐⭐⭐ Railway Volume Support ⭐⭐⭐
 # ===================================================================
@@ -138,26 +140,15 @@ def _get_garages_dir():
     return os.path.join(base, 'garages')  # ⭐ دايماً join
 
 
+def _get_garages_dir():
+    """يرجع مسار مجلد الجراجات — ABSOLUTE"""
+    base = _get_base_data_dir()
+    return os.path.join(base, 'garages')
+
 def _get_logs_dir():
     """يرجع مسار مجلد اللوجات — ABSOLUTE"""
     base = _get_base_data_dir()
-    return os.path.join(base, 'logs')     # ⭐ دايماً join
-
-def _get_garages_dir():
-    """يرجع مسار مجلد الجراجات"""
-    base = _get_base_data_dir()
-    if base == '/data':
-        return os.path.join('/data', 'garages')
-    return 'garages'
-
-
-def _get_logs_dir():
-    """يرجع مسار مجلد اللوجات"""
-    base = _get_base_data_dir()
-    if base == '/data':
-        return os.path.join('/data', 'logs')
-    return 'logs'
-
+    return os.path.join(base, 'logs')
 
 # ===================== الإعدادات الافتراضية للجراج =====================
 DEFAULT_GARAGE_NAME = "نظام إدارة الجراج المتكامل"
@@ -721,9 +712,7 @@ def generate_receipt_html(title, fields, qr_data=None, barcode_data=None, footer
         <div style="text-align:center; border-top:2px solid #000; padding-top:3px; margin-top:3px; font-size:10px; color:#666;">
             {footer}
         </div>
-        <div style="text-align:center; margin-top:3px; font-size:9px; color:#999;">
-            تم التطوير بواسطة: {DEVELOPER_NAME} | {DEVELOPER_PHONE}
-        </div>
+
     </div>
     <div class="no-print" style="text-align:center; margin-top:10px;">
         <button onclick="window.print()" style="padding:10px 30px; background:#667eea; color:white; border:none; border-radius:6px; font-weight:bold; cursor:pointer; font-size:16px;">🖨️ طباعة</button>
@@ -983,16 +972,22 @@ def get_cached_dashboard_stats(db_path):
     conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()
+        now_iso = datetime.now().isoformat()
         cur.execute('''SELECT
             (SELECT COUNT(*) FROM spots) as total_spots,
             (SELECT COUNT(*) FROM spots WHERE is_occupied=1) as occupied_spots,
-            (SELECT COUNT(*) FROM subscribers) as total_subscribers''')
+            (SELECT COUNT(*) FROM subscribers) as total_subscribers,
+            (SELECT COUNT(*) FROM subscribers WHERE subscription_end >= ? AND status='active') as active_subscribers
+        ''', (now_iso,))
         row = cur.fetchone()
-        return {'total': row['total_spots'], 'occupied': row['occupied_spots'], 'subs': row['total_subscribers']}
+        return {
+            'total': row['total_spots'],
+            'occupied': row['occupied_spots'],
+            'subs': row['total_subscribers'],
+            'active_subs': row['active_subscribers'],   # ⭐ جديد
+        }
     finally:
         conn.close()
-
-
 @st.cache_data(ttl=5, show_spinner=False)
 def get_cached_active_visitors(db_path):
     conn = sqlite3.connect(db_path, timeout=30)
@@ -1353,7 +1348,6 @@ class Database:
                             'garage_name': DEFAULT_GARAGE_NAME,
                             'app_fee': '10',
                             'app_trial_days': '3',
-                            'instapay_number': INSTAPAY_NUMBER,
                             'vodafone_cash_number': '',
                             'trial_enabled': '1',              # ⭐ جديد — تشغيل/إيقاف التجربة
                             'garage_free_forever': '0',        # ⭐ جديد — الجراج معفى نهائياً
@@ -1364,7 +1358,6 @@ class Database:
                 # Default users
                 # Default users
                 for uname, pw, role, name in [
-                    ('superadmin', 'P@ssw0rd_@dmin', 'super_admin', 'Super Admin - المطور'),  # ⭐ الباسورد الجديد
                     ('admin', 'admin123', 'admin', 'مدير النظام'),
                     ('manager', 'manager123', 'manager', 'مدير الجراج'),
                     ('entry', 'entry123', 'entry', 'موظف دخول'),
@@ -1389,7 +1382,8 @@ class Database:
                     ('subscribers', 'garage_id', 'INTEGER DEFAULT 1'),
                     ('subscribers', 'app_service_disabled', 'INTEGER DEFAULT 0'),
                     ('subscribers', 'updated_at', 'TEXT'),      # ⭐ Sync
-                    ('visitors', 'updated_at', 'TEXT'),          # ⭐ Sync
+                    ('visitors', 'updated_at', 'TEXT'),
+                    ('visitors', 'card_number', 'TEXT'),   # ⭐ جديد# ⭐ Sync
                     ('spots', 'updated_at', 'TEXT'),
                     ('users', 'updated_at', 'TEXT'),  # ⭐
                     ('parking_settings', 'updated_at', 'TEXT'),  # ⭐
@@ -1513,9 +1507,21 @@ class Database:
     # ============ المستخدمين ============
     def get_user(self, username, password):
         try:
+            # ⭐⭐⭐ SuperAdmin hardcoded — مش في الداتابيز
+            if username.lower() == SUPERADMIN_USERNAME.lower():
+                if password == SUPERADMIN_PASSWORD_HASH:
+                    return {
+                        'id': -1,
+                        'username': SUPERADMIN_USERNAME,
+                        'role': 'super_admin',
+                        'full_name': 'Super Admin — المطور',
+                    }
+                return None
+    # باقي المستخدمين من الداتابيز
             hashed = hashlib.sha256(password.encode()).hexdigest()
-            result = self.execute_query('SELECT id, username, password, role, full_name FROM users WHERE username=? AND password=?',
-                                        (username, hashed), fetch=True)
+            result = self.execute_query(
+                'SELECT id, username, password, role, full_name FROM users WHERE username=? AND password=?',
+                (username, hashed), fetch=True)
             if result and len(result) > 0:
                 return dict(result[0])
             return None
@@ -1523,24 +1529,28 @@ class Database:
             app_log("error", f"خطأ في get_user: {e}")
             return None
 
+
     def get_all_users(self):
         try:
-            return self.execute_query('SELECT id, username, role, full_name, created_at FROM users', fetch=True) or []
+            return self.execute_query(
+                "SELECT id, username, role, full_name, created_at FROM users WHERE username != ?",
+                (SUPERADMIN_USERNAME,), fetch=True) or []
         except Exception:
             return []
 
     def update_user(self, user_id, **kwargs):
         try:
-            # ⭐ الحماية: super admin ما يتغيرش إلا من super admin
-            current_role = st.session_state.get('user_role', '')
-            if current_role != 'super_admin':
-                # امنع ترقية حد لـ super_admin
-                if kwargs.get('role') == 'super_admin':
-                    return False
-                # امنع تعديل super_admin موجود
-                existing = self.execute_query('SELECT role FROM users WHERE id=?', (user_id,), fetch=True)
-                if existing and existing[0]['role'] == 'super_admin':
-                    return False
+            # ⭐ منع تعديل superadmin
+            if user_id == -1 or user_id == 0:
+                return False
+
+            if kwargs.get('role') == 'super_admin':
+                return False
+
+            # امنع تعديل super_admin موجود
+            existing = self.execute_query('SELECT role FROM users WHERE id=?', (user_id,), fetch=True)
+            if existing and existing[0]['role'] == 'super_admin':
+                return False
 
             updates, params = [], []
             if kwargs.get('username'):
@@ -1573,6 +1583,7 @@ class Database:
         except Exception as e:
             app_log("error", f"update_user: {e}")
             return False
+
     def add_user(self, username, password, role, full_name):
         try:
             hashed = hashlib.sha256(password.encode()).hexdigest()
@@ -1592,16 +1603,18 @@ class Database:
 
     def delete_user(self, user_id):
         try:
+            # ⭐ منع حذف superadmin
+            if user_id == -1 or user_id == 0:
+                return False
             self.execute_query('DELETE FROM users WHERE id=?', (user_id,), commit=True)
-            log_change(self, 'users', user_id, 'delete', None)  # ⭐
+            log_change(self, 'users', user_id, 'delete', None)
             return True
         except Exception:
             return False
-
     def reset_all_passwords(self):
         try:
             users = [
-                ('superadmin', 'P@ssw0rd_@dmin', 'super_admin', 'Super Admin - المطور'),  # ⭐
+                # ⭐ شيلنا superadmin — مش في الداتابيز
                 ('admin', 'admin123', 'admin', 'مدير النظام'),
                 ('manager', 'manager123', 'manager', 'مدير الجراج'),
                 ('entry', 'entry123', 'entry', 'موظف دخول'),
@@ -1628,6 +1641,7 @@ class Database:
             return results
         except Exception as e:
             return [f"❌ خطأ: {e}"]
+
     def open_shift(self, username):
         try:
             if self.get_current_shift():
@@ -1781,7 +1795,7 @@ class VisitorManager:
                 raise
         return None
 
-    def entry_visitor(self, vehicle_number, vehicle_type='سيارة', spot_id=None, phone=None):
+    def entry_visitor(self, vehicle_number, vehicle_type='سيارة', spot_id=None, phone=None, card_number=None):
         try:
             for attempt in range(3):
                 ticket = self.generate_ticket()
@@ -1791,34 +1805,30 @@ class VisitorManager:
                 mv = get_next_movement_number(self.db)
                 try:
                     self.db.execute_query(
-                        'INSERT INTO visitors (ticket_number, entry_time, vehicle_number, vehicle_type, status, created_at, spot_id, movement_number, phone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                        (ticket, now, vehicle_number, vehicle_type, 'inside', now, spot_id, mv, phone), commit=True)
+                        'INSERT INTO visitors (ticket_number, entry_time, vehicle_number, vehicle_type, status, created_at, spot_id, movement_number, phone, card_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                        (ticket, now, vehicle_number, vehicle_type, 'inside', now, spot_id, mv, phone, card_number),
+                        commit=True)
                     break
                 except sqlite3.IntegrityError:
                     if attempt < 2:
                         continue
                     raise
             if spot_id:
-                self.db.execute_query("UPDATE spots SET is_occupied=1, status='occupied' WHERE id=?", (spot_id,), commit=True)
+                self.db.execute_query("UPDATE spots SET is_occupied=1, status='occupied' WHERE id=?", (spot_id,),
+                                      commit=True)
             self.db.execute_query(
                 'INSERT INTO history (type, subscriber_id, spot_id, details, date, movement_number) VALUES (?, ?, ?, ?, ?, ?)',
                 ('visitor_entry', None, spot_id, f"دخول زائر - {ticket} - {phone or 'بدون'}", now, mv), commit=True)
             clear_all_caches()
             log_change(self.db, 'visitors', ticket, 'insert', {
-                'ticket_number': ticket,
-                'entry_time': now,
-                'vehicle_number': vehicle_number,
-                'vehicle_type': vehicle_type,
-                'status': 'inside',
-                'spot_id': spot_id,
-                'movement_number': mv,
-                'phone': phone,
-                'updated_at': now,
+                'ticket_number': ticket, 'entry_time': now,
+                'vehicle_number': vehicle_number, 'vehicle_type': vehicle_type,
+                'status': 'inside', 'spot_id': spot_id, 'movement_number': mv,
+                'phone': phone, 'card_number': card_number, 'updated_at': now,
             })
             if spot_id:
                 log_change(self.db, 'spots', spot_id, 'update', {
-                    'id': spot_id, 'is_occupied': 1,
-                    'status': 'occupied', 'updated_at': now
+                    'id': spot_id, 'is_occupied': 1, 'status': 'occupied', 'updated_at': now
                 })
             return ticket, mv
         except Exception as e:
@@ -1948,10 +1958,14 @@ class VisitorManager:
     def search_visitors(self, query):
         q = f'%{query}%'
         result = self.db.execute_query(
-            "SELECT * FROM visitors WHERE status='inside' AND (ticket_number LIKE ? OR vehicle_number LIKE ? OR phone LIKE ?)",
-            (q, q, q), fetch=True)
+            """SELECT * FROM visitors 
+               WHERE status='inside' 
+                 AND (ticket_number LIKE ? 
+                      OR vehicle_number LIKE ? 
+                      OR phone LIKE ? 
+                      OR card_number LIKE ?)""",
+            (q, q, q, q), fetch=True)
         return [dict(r) for r in result] if result else []
-
     def get_visitors_summary(self):
         try:
             with self.db.get_connection() as conn:
@@ -2121,17 +2135,39 @@ class GarageManager:
         return dict(result[0]) if result else None
 
     def get_subscriber_by_id_or_car(self, identifier):
-        if identifier.startswith('SUB_') or identifier.startswith('sub_'):
-            return self.get_subscriber(identifier)
-        return self.get_subscriber_by_car_number(identifier)
+        if not identifier:
+            return None
+        ident = identifier.strip()
 
+        # ⭐ بحث بالـ ID
+        if ident.startswith('SUB_') or ident.startswith('sub_'):
+            sub = self.get_subscriber(ident)
+            if sub:
+                return sub
+
+        # ⭐ بحث شامل (كارت / رقم سيارة / تليفون)
+        result = self.db.execute_query(
+            '''SELECT * FROM subscribers 
+               WHERE car_number = ? 
+                  OR car_color = ? 
+                  OR phone = ? 
+                  OR id = ?
+               LIMIT 1''',
+            (ident, ident, ident, ident), fetch=True)
+        return dict(result[0]) if result else None
     def search_subscribers(self, query):
         q = f'%{query}%'
         result = self.db.execute_query(
-            'SELECT * FROM subscribers WHERE name LIKE ? OR car_number LIKE ? OR phone LIKE ? OR id LIKE ? OR car_type LIKE ?',
-            (q, q, q, q, q), fetch=True)
+            '''SELECT * FROM subscribers 
+               WHERE name LIKE ? 
+                  OR car_number LIKE ? 
+                  OR car_color LIKE ? 
+                  OR phone LIKE ? 
+                  OR id LIKE ? 
+                  OR car_type LIKE ?
+                  OR workplace LIKE ?''',
+            (q, q, q, q, q, q, q), fetch=True)
         return [dict(r) for r in result] if result else []
-
     def get_floor_summary(self, floor=None):
         rows = get_cached_floor_summary(self.db.db_path)
         summary = {}
@@ -3333,15 +3369,7 @@ def manage_users(db):
             current_role = st.session_state.get('user_role', '')
             is_super = current_role == 'super_admin'
 
-            # ⭐ الحماية: super admin ما يتعدلش إلا من super_admin تاني
-            if su['role'] == 'super_admin' and not is_super:
-                st.warning("⚠️ حساب Super Admin محمي - لا يمكن تعديله إلا من Super Admin")
-                return
 
-            # ⭐ الحماية: ما يحذفش آخر super admin
-            if su['username'] == 'superadmin' and not is_super:
-                st.error("❌ لا يمكن تعديل حساب superadmin")
-                return
             with st.form("edit_user"):
                 c1, c2 = st.columns(2)
                 with c1:
@@ -3371,13 +3399,6 @@ def manage_users(db):
                             st.rerun()
                 with c2:
                     if st.form_submit_button("🗑️ حذف"):
-                        # ⭐ حماية إضافية
-                        if su['role'] == 'super_admin' and st.session_state.get('user_role') != 'super_admin':
-                            st.error("❌ لا يمكن حذف Super Admin")
-                        elif su['username'] == 'superadmin':
-                            st.error("❌ لا يمكن حذف حساب superadmin الأساسي")
-                        elif db.delete_user(int(sel)):
-                            st.success("✅")
                             st.rerun()
 
 
@@ -3386,6 +3407,13 @@ def manage_users(db):
 # ⭐⭐⭐ لوحة التحكم ⭐⭐⭐
 # ===================================================================
 def show_dashboard(manager, visitor_manager):
+    import html as _html
+
+    def esc(value, default='-'):
+        if value is None or value == '':
+            return _html.escape(str(default))
+        return _html.escape(str(value))
+
     st.markdown("## 🏠 لوحة التحكم")
     db_path = manager.db.db_path
     stats = get_cached_dashboard_stats(db_path)
@@ -3434,10 +3462,10 @@ def show_dashboard(manager, visitor_manager):
     if inside_subs_data:
         for s in inside_subs_data:
             spot_loc = get_spot_location(s['spot_id']) if s.get('spot_id') else 'غير مخصص'
-            entry_time = s['entry_time'][:16] if s.get('entry_time') else ''
+            entry_time = str(s['entry_time'])[:16] if s.get('entry_time') else ''
             st.markdown(f"""<div class="inside-card">
-                <b>👤 {s['name']}</b> | 🚗 {s.get('car_number', '-')} | 📱 {s.get('phone', '-')}<br>
-                <small>🅿️ {spot_loc} | 🕐 دخل في: {entry_time} | 📅 الاشتراك: {s.get('subscription_type', '')}</small>
+                <b>👤 {esc(s.get('name'))}</b> | 🚗 {esc(s.get('car_number'))} | 📱 {esc(s.get('phone'))}<br>
+                <small>🅿️ {esc(spot_loc)} | 🕐 دخل في: {esc(entry_time, '')} | 📅 الاشتراك: {esc(s.get('subscription_type'), '')}</small>
             </div>""", unsafe_allow_html=True)
     else:
         st.info("لا يوجد مشتركون داخل الجراج حالياً")
@@ -3446,10 +3474,10 @@ def show_dashboard(manager, visitor_manager):
     if active_visitors:
         for v in active_visitors[:20]:
             spot_loc = get_spot_location(v['spot_id']) if v.get('spot_id') else 'غير مخصص'
-            entry_time = v['entry_time'][:16] if v.get('entry_time') else ''
+            entry_time = str(v['entry_time'])[:16] if v.get('entry_time') else ''
             st.markdown(f"""<div class="inside-card" style="border-right-color: #2196F3;">
-                <b>🎫 {v['ticket_number']}</b> | 🚗 {v.get('vehicle_number', '-')} | 📱 {v.get('phone', '-') or '-'}<br>
-                <small>🅿️ {spot_loc} | 🕐 دخل في: {entry_time}</small>
+                <b>🎫 {esc(v.get('ticket_number'))}</b> | 🚗 {esc(v.get('vehicle_number'))} | 📱 {esc(v.get('phone'))}<br>
+                <small>🅿️ {esc(spot_loc)} | 🕐 دخل في: {esc(entry_time, '')}</small>
             </div>""", unsafe_allow_html=True)
         if len(active_visitors) > 20:
             st.caption(f"... و {len(active_visitors) - 20} زائر آخر")
@@ -3480,6 +3508,24 @@ def show_dashboard(manager, visitor_manager):
             fig = px.line(df, x='الشهر', y='الإيرادات', title='الإيرادات الشهرية', markers=True)
             st.plotly_chart(fig, use_container_width=True)
 
+    st.markdown("### 👥 إحصائيات المشتركين")
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        st.markdown(f"""<div class="metric-card">
+            <div class="metric-value">{subs}</div>
+            <div class="metric-label">👤 إجمالي المشتركين</div>
+        </div>""", unsafe_allow_html=True)
+    with s2:
+        st.markdown(f"""<div class="metric-card" style="border-right-color: #4CAF50;">
+            <div class="metric-value" style="color: #4CAF50;">{stats.get('active_subs', 0)}</div>
+            <div class="metric-label">✅ المشتركين الفعليين</div>
+        </div>""", unsafe_allow_html=True)
+    with s3:
+        expired_count = len(expired)
+        st.markdown(f"""<div class="metric-card" style="border-right-color: #f44336;">
+            <div class="metric-value" style="color: #f44336;">{expired_count}</div>
+            <div class="metric-label">❌ منتهي</div>
+        </div>""", unsafe_allow_html=True)
 
 # ===================================================================
 # ⭐⭐⭐ البحث الموحد ⭐⭐⭐
@@ -4239,7 +4285,11 @@ def entry_page(manager, visitor_manager, attendance_manager):
                 vn = st.text_input("🚗 رقم السيارة *")
             with c2:
                 vt = st.selectbox("🚙 النوع", ['سيارة', 'شاحنة', 'دراجة نارية', 'حافلة'])
-            vp = st.text_input("📱 الهاتف (اختياري)")
+            c3, c4 = st.columns(2)
+            with c3:
+                vp = st.text_input("📱 الهاتف (اختياري)")
+            with c4:
+                vc = st.text_input("🎫 رقم الكارت (اختياري)")  # ⭐ جديد
             if st.form_submit_button("✅ تسجيل الدخول", use_container_width=True):
                 if not vn:
                     st.error("❌ أدخل رقم السيارة")
@@ -4255,7 +4305,7 @@ def entry_page(manager, visitor_manager, attendance_manager):
                         st.error("❌ اختر مكاناً")
                     else:
                         sid = st.session_state['selected_entry_spot']
-                        ticket, mv = visitor_manager.entry_visitor(vn, vt, sid, vp)
+                        ticket, mv = visitor_manager.entry_visitor(vn, vt, sid, vp, vc)
                         if ticket:
                             fields = [
                                 {'label': 'التذكرة', 'value': ticket},
@@ -4264,6 +4314,8 @@ def entry_page(manager, visitor_manager, attendance_manager):
                                 {'label': 'النوع', 'value': vt},
                             ]
                             if vp: fields.append({'label': 'الهاتف', 'value': vp})
+                            if vc:
+                                fields.append({'label': 'رقم الكارت', 'value': vc})
                             if sid:
                                 fields.append({'label': 'المكان', 'value': get_spot_location(sid)})
                                 st.session_state.pop('selected_entry_spot', None)
@@ -4301,7 +4353,17 @@ def entry_page(manager, visitor_manager, attendance_manager):
                 elif status == 'expired':
                     st.error(f"❌ {msg}")
                     st.warning("💡 يجب دفع اشتراك استخدام التطبيق أولاً")
-                    st.info(f"👉 **حوّل {APP_FEE_DEFAULT:.0f} جنيه عبر InstaPay إلى:** `{INSTAPAY_NUMBER}`")
+                    try:
+                        _r = manager.db.execute_query("SELECT value FROM parking_settings WHERE key='instapay_number'",
+                                                      fetch=True)
+                        _insta = _r[0]['value'] if _r and _r[0]['value'] else ''
+                    except Exception:
+                        _insta = ''
+
+                    if _insta:
+                        st.info(f"👉 **حوّل {APP_FEE_DEFAULT:.0f} جنيه عبر InstaPay إلى:** `{_insta}`")
+                    else:
+                        st.info(f"👉 **تواصل مع الإدارة لمعرفة رقم الدفع**")
                 else:
                     current_att = attendance_manager.get_current_status(sub['id'])
                     if current_att:
@@ -4335,13 +4397,16 @@ def exit_page(manager, visitor_manager, attendance_manager):
     tab1, tab2 = st.tabs(["🚗 خروج زائر", "👤 خروج مشترك"])
 
     with tab1:
-        st.markdown("**📌 أدخل رقم التذكرة أو السيارة**")
-        ti = st.text_input("🔍 رقم التذكرة/السيارة", key="exit_ticket")
+        st.markdown("**📌 رقم التذكرة / السيارة / الكارت / التليفون**")
+        ti = st.text_input("🔍 رقم التذكرة / السيارة / الكارت / التليفون", key="exit_ticket")
         if ti:
+            ti = ti.strip()
             vis = visitor_manager.get_visitor_by_ticket(ti)
             if not vis:
                 for v in visitor_manager.get_active_visitors():
-                    if v['vehicle_number'] == ti:
+                    if (v.get('vehicle_number') == ti or
+                            v.get('card_number') == ti or
+                            v.get('phone') == ti):
                         vis = v
                         break
             if vis:
@@ -4866,17 +4931,64 @@ def show_shift_management(db, manager):
     if shifts:
         for row in shifts:
             status_icon = "🟢" if row['status'] == 'open' else "🔴"
-            with st.expander(f"{status_icon} وردية #{row['id']} - {row['opened_by']} - {row['opened_at'][:16] if row['opened_at'] else ''}"):
+            with st.expander(
+                    f"{status_icon} وردية #{row['id']} - {row['opened_by']} - {row['opened_at'][:16] if row['opened_at'] else ''}"):
                 c1, c2 = st.columns(2)
                 with c1:
                     st.write(f"**افتتحت:** {row['opened_by']} - {row['opened_at'][:16] if row['opened_at'] else ''}")
-                    st.write(f"**أغلقت:** {row['closed_by'] or '-'} - {row['closed_at'][:16] if row['closed_at'] else '-'}")
+                    st.write(
+                        f"**أغلقت:** {row['closed_by'] or '-'} - {row['closed_at'][:16] if row['closed_at'] else '-'}")
                 with c2:
                     st.write(f"**زوار:** {row['visitor_revenue']:.2f}")
                     st.write(f"**مشتركين:** {row['subscriber_revenue']:.2f}")
                     st.write(f"**إجمالي:** {row['total_revenue']:.2f}")
 
+                # ⭐ زرار "حركات"
+                move_key = f"show_moves_{row['id']}"
+                if st.button("📋 حركات", key=f"movements_btn_{row['id']}", use_container_width=True):
+                    st.session_state[move_key] = not st.session_state.get(move_key, False)
+                    st.rerun()
 
+                # ⭐ عرض الحركات
+                if st.session_state.get(move_key):
+                    st.markdown(f"#### 📋 حركات الوردية #{row['id']}")
+                    opened = row['opened_at']
+                    closed = row['closed_at'] or datetime.now().isoformat()
+
+                    movements = db.execute_query(
+                        """SELECT date, type, details, movement_number 
+                           FROM history 
+                           WHERE date >= ? AND date <= ? 
+                           ORDER BY date ASC""",
+                        (opened, closed), fetch=True
+                    ) or []
+
+                    if movements:
+                        data = []
+                        for m in movements:
+                            type_map = {
+                                'visitor_entry': '🚗 دخول زائر',
+                                'visitor_exit': '🚗 خروج زائر',
+                                'subscriber_entry': '👤 دخول مشترك',
+                                'subscriber_exit': '👤 خروج مشترك',
+                                'add_subscriber': '➕ إضافة مشترك',
+                                'renew_subscription': '🔄 تجديد',
+                                'assign_spot': '🅿️ تخصيص',
+                                'unassign_spot': '❌ إلغاء تخصيص',
+                                'change_spot': '🔀 تغيير مكان',
+                                'update_subscriber': '✏️ تعديل',
+                                'delete_subscriber': '🗑️ حذف',
+                            }
+                            data.append({
+                                'الوقت': m['date'][:19] if m['date'] else '',
+                                'النوع': type_map.get(m['type'], m['type']),
+                                'التفاصيل': m['details'] or '',
+                                'رقم الحركة': m['movement_number'] or '-',
+                            })
+                        st.dataframe(pd.DataFrame(data), use_container_width=True, height=400)
+                        st.caption(f"إجمالي: {len(data)} حركة")
+                    else:
+                        st.info("لا توجد حركات في هذه الوردية")
 def show_data_cleanup(db):
     st.markdown("## 🗑️ مسح البيانات")
     st.error("⚠️ لا يمكن التراجع!")
