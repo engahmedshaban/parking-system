@@ -204,18 +204,91 @@ def _init_app_tables(db_path):
 # ============================================================
 #  قراءة الجراجات من garages_registry.db
 # ============================================================
+def _get_portal_data_dir():
+    """
+    ⭐ نفس منطق Lastv.py — يرجع مكان الداتا الصح
+    """
+    # 1) من متغير البيئة
+    custom = os.environ.get('PARKING_DATA_DIR')
+    if custom and os.path.isdir(custom):
+        return custom
+
+    # 2) Railway Volume
+    if os.path.exists('/data') and os.path.isdir('/data'):
+        return '/data'
+
+    # 3) fallback: cwd
+    return '.'
+
+
 def get_all_garages_from_registry():
+    """
+    ⭐ يقرأ قائمة الجراجات من المسار الصح
+    ⭐ ويرجّع مسارات db_path مطلقة صحيحة
+    """
     try:
-        registry_path = '/data/garages_registry.db' if os.path.exists('/data') else 'garages_registry.db'
+        base = _get_portal_data_dir()
+        registry_path = os.path.join(base, 'garages_registry.db')
+
+        # ⭐ لو مش موجود في المكان الصح، جرّب الأماكن المحتملة
         if not os.path.exists(registry_path):
-            return []
-        return _query_all(
+            candidates = [
+                'garages_registry.db',  # cwd
+                '/data/garages_registry.db',  # Railway
+                os.path.join(base, 'garages_registry.db'),  # data dir
+            ]
+            for c in candidates:
+                if os.path.exists(c):
+                    registry_path = c
+                    break
+            else:
+                print(f"❌ Registry not found. Tried: {candidates}")
+                return []
+
+        print(f"✅ Registry: {registry_path}")
+
+        rows = _query_all(
             registry_path,
             "SELECT id, name, address, phone, db_path FROM garages WHERE is_active=1 ORDER BY id"
         )
-    except Exception:
-        return []
 
+        # ⭐⭐⭐ الأهم: صحّح مسارات db_path
+        fixed_rows = []
+        for r in rows:
+            dbp = r.get('db_path', '')
+            if not dbp:
+                continue
+
+            # ⭐ لو المسار نسبي → حوّله لمطلق
+            if not os.path.isabs(dbp):
+                # جرّب المسار الجديد أولاً
+                new_path = os.path.join(base, dbp)
+                if os.path.exists(new_path):
+                    r['db_path'] = new_path
+                else:
+                    # fallback: cwd
+                    r['db_path'] = os.path.abspath(dbp)
+
+            # ⭐ لو المسار المطلق لسه مش موجود، جرّب تبديل اسم الفولدر
+            if not os.path.exists(r['db_path']):
+                # مثلاً: كان في _runtime، دلوقتي في .GarageSystemData
+                fname = os.path.basename(r['db_path'])
+                alt_path = os.path.join(base, 'garages', fname)
+                if os.path.exists(alt_path):
+                    r['db_path'] = alt_path
+                    print(f"✅ Fixed path: {dbp} → {alt_path}")
+                else:
+                    print(f"⚠️ DB not found: {r['db_path']}")
+                    continue
+
+            fixed_rows.append(r)
+
+        print(f"✅ Found {len(fixed_rows)} active garages with valid DBs")
+        return fixed_rows
+
+    except Exception as e:
+        print(f"❌ get_all_garages error: {e}")
+        return []
 
 # ============================================================
 #  ⭐⭐⭐ حالة اشتراك التطبيق ⭐⭐⭐
