@@ -23,3 +23,5 @@ python-dotenv>=1.0.0
 
 # === Sync ===
 requests>=2.32.0
+
+argon2-cffi>=23.1.0

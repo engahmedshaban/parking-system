@@ -1,25 +1,29 @@
-# sync_engine.py
-# مزامنة كاملة — كل الجداول (Snapshot-based)
+# sync_engine.py — مزامنة كاملة بين كل الأجهزة
 import sqlite3
 import json
 import os
-import requests
-from datetime import datetime
-import gzip
+import time
 import base64
+import gzip
+from datetime import datetime
+
+import requests
+
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
 
-
+# ============================================================
+# ⭐ الإعدادات
+# ============================================================
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
 GIST_ID = os.environ.get('GIST_ID', '')
 DEVICE_ID = os.environ.get('DEVICE_ID', 'garage-pc-1')
 
-
-# الجداول اللي هتتزامن (اسم الجدول: اسم PK)
+# ⭐ الجداول اللي بتتزامن
 SYNC_TABLES = {
     'subscribers': 'id',
     'spots': 'id',
@@ -31,12 +35,16 @@ SYNC_TABLES = {
     'users': 'id',
     'parking_settings': 'key',
     'app_payments': 'id',
-    'garages': 'id',          # من registry DB
+    'garages': 'id',
 }
 
+
+# ============================================================
+# ⭐ اكتشاف مسار قاعدة البيانات النشطة
+# ============================================================
 def get_local_db():
-    """اكتشاف مسار DB الجراج النشط — الأولوية دائمًا للـ registry"""
-    # ⭐ 1) الأولوية القصوى: الجراج النشط من الـ registry
+    """يرجع مسار DB للجراج النشط"""
+    # 1) من registry
     registry = '/data/garages_registry.db' if os.path.exists('/data') else 'garages_registry.db'
     if os.path.exists(registry):
         try:
@@ -46,52 +54,126 @@ def get_local_db():
                     "SELECT db_path FROM garages WHERE is_active=1 ORDER BY id LIMIT 1"
                 ).fetchone()
                 if row and row['db_path'] and os.path.exists(row['db_path']):
-                    print(f"[get_local_db] Using active garage DB: {row['db_path']}")
                     return row['db_path']
         except Exception as e:
             print(f"[get_local_db] Registry error: {e}")
 
-    # ⭐ 2) احتياطي: LOCAL_DB من .env
+    # 2) من متغير البيئة
     env_db = os.environ.get('LOCAL_DB', '')
     if env_db and os.path.exists(env_db):
-        print(f"[get_local_db] Fallback to LOCAL_DB: {env_db}")
         return env_db
 
-    # ⭐ 3) الأخير: garage.db
-    print("[get_local_db] Fallback to garage.db")
+    # 3) fallback
     return 'garage.db'
+
 
 def get_registry_db():
     return '/data/garages_registry.db' if os.path.exists('/data') else 'garages_registry.db'
 
 
-LOCAL_DB = get_local_db()
-REGISTRY_DB = get_registry_db()
+# ============================================================
+# ⭐ Gist Read/Write
+# ============================================================
+def _gist_read(file_name='sync_state.json'):
+    if not GITHUB_TOKEN or not GIST_ID:
+        return None
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(
+                f'https://api.github.com/gists/{GIST_ID}',
+                headers={'Authorization': f'token {GITHUB_TOKEN}'},
+                timeout=30
+            )
+            if r.status_code == 404:
+                return {}
+            if r.status_code != 200:
+                print(f"[gist_read] HTTP {r.status_code} (attempt {attempt + 1})")
+                time.sleep(2)
+                continue
+
+            files = r.json().get('files', {})
+            file_info = files.get(file_name)
+            if not file_info:
+                return {}
+
+            content = file_info.get('content', '')
+
+            # ⭐ لو المحتوى مقطوع، استخدم raw_url
+            if not content or file_info.get('truncated'):
+                raw_url = file_info.get('raw_url')
+                if raw_url:
+                    try:
+                        rr = requests.get(raw_url, timeout=60)
+                        if rr.status_code == 200:
+                            content = rr.text
+                    except Exception as e:
+                        print(f"[gist_read raw] {e}")
+
+            if not content:
+                return {}
+
+            # ⭐ فك الضغط
+            if content.startswith('GZIP:'):
+                try:
+                    raw = base64.b64decode(content[5:])
+                    decompressed = gzip.decompress(raw)
+                    return json.loads(decompressed.decode('utf-8'))
+                except Exception as e:
+                    print(f"[gist_read decompress] {e}")
+                    return {}
+
+            return json.loads(content)
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            print(f"[gist_read] Network error (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(3)
+        except Exception as e:
+            print(f"[gist_read] {e}")
+            return None
+    return None
+
+
+def _gist_write(data, file_name='sync_state.json'):
+    if not GITHUB_TOKEN or not GIST_ID:
+        return False
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # ⭐ اضغط البيانات
+            payload = json.dumps(data, ensure_ascii=False, default=str)
+            compressed = gzip.compress(payload.encode('utf-8'))
+            b64 = base64.b64encode(compressed).decode('ascii')
+            content = 'GZIP:' + b64
+
+            r = requests.patch(
+                f'https://api.github.com/gists/{GIST_ID}',
+                headers={'Authorization': f'token {GITHUB_TOKEN}'},
+                json={'files': {file_name: {'content': content}}},
+                timeout=120
+            )
+            if r.status_code == 200:
+                return True
+            print(f"[gist_write] HTTP {r.status_code} (attempt {attempt + 1})")
+            time.sleep(2)
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            print(f"[gist_write] Network error (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(3)
+        except Exception as e:
+            print(f"[gist_write] {e}")
+            return False
+    return False
 
 
 # ============================================================
-def ensure_updated_at():
-    """يضمن وجود عمود updated_at في كل الجداول"""
-    for db_path in [LOCAL_DB, REGISTRY_DB]:
-        if not db_path or not os.path.exists(db_path):
-            continue
-        try:
-            with sqlite3.connect(db_path, timeout=30) as conn:
-                cur = conn.cursor()
-                for table in SYNC_TABLES:
-                    try:
-                        cur.execute(f"PRAGMA table_info({table})")
-                        cols = [c[1] for c in cur.fetchall()]
-                        if cols and 'updated_at' not in cols:
-                            cur.execute(f"ALTER TABLE {table} ADD COLUMN updated_at TEXT")
-                    except Exception:
-                        pass
-                conn.commit()
-        except Exception as e:
-            print(f"[ensure_updated_at] {db_path}: {e}")
-
-
-def _dump_table(conn, table):
+# ⭐ Snapshot: قراءة كل الجداول
+# ============================================================
+def _dump_table(conn, table, pk_col):
     """يرجع dict: {pk: {'data': {...}, '_updated_at': '...'}}"""
     try:
         conn.row_factory = sqlite3.Row
@@ -100,8 +182,6 @@ def _dump_table(conn, table):
         rows = {}
         for r in cur.fetchall():
             d = dict(r)
-            # اختيار عمود الـ PK
-            pk_col = SYNC_TABLES.get(table, 'id')
             pk_val = d.get(pk_col)
             if pk_val is None:
                 pk_val = d.get('id') or d.get('key') or d.get('ticket_number')
@@ -117,7 +197,7 @@ def _dump_table(conn, table):
 
 
 def take_snapshot(db_path=None):
-    """snapshot كامل للـ DB المحدد"""
+    """snapshot كامل للـ DB"""
     db_path = db_path or get_local_db()
     snap = {
         'device_id': DEVICE_ID,
@@ -126,29 +206,35 @@ def take_snapshot(db_path=None):
         'dbs': {'main': {}, 'registry': {}},
     }
 
+    # ⭐ DB الأساسية
     if db_path and os.path.exists(db_path):
         with sqlite3.connect(db_path, timeout=30) as conn:
-            for table in SYNC_TABLES:
+            for table, pk_col in SYNC_TABLES.items():
                 if table == 'garages':
                     continue
-                snap['dbs']['main'][table] = _dump_table(conn, table)
+                snap['dbs']['main'][table] = _dump_table(conn, table, pk_col)
 
-    # الـ registry دايمًا نقرأه من مكانه الأساسي
+    # ⭐ Registry
     reg = get_registry_db()
     if os.path.exists(reg):
         with sqlite3.connect(reg, timeout=30) as conn:
-            snap['dbs']['registry']['garages'] = _dump_table(conn, 'garages')
+            snap['dbs']['registry']['garages'] = _dump_table(conn, 'garages', 'id')
 
     return snap
-def _apply_table(conn, table, rows):
-    """يطبق صفوف على جدول (last-write-wins بالـ updated_at)"""
+
+
+# ============================================================
+# ⭐ تطبيق snapshot على DB
+# ============================================================
+def _apply_table(conn, table, rows, pk_col):
+    """يطبق صفوف على جدول (Last-Write-Wins)"""
     if not rows:
         return 0, 0, 0
 
     applied = skipped = errors = 0
-    pk_col = SYNC_TABLES.get(table, 'id')
-
     cur = conn.cursor()
+
+    # ⭐ نتأكد من الأعمدة
     cur.execute(f"PRAGMA table_info({table})")
     table_cols = [c[1] for c in cur.fetchall()]
     if not table_cols:
@@ -161,22 +247,25 @@ def _apply_table(conn, table, rows):
             incoming = entry.get('data', {})
             in_ts = entry.get('_updated_at') or ''
 
-            # شوف الموجود محليًا
+            # ⭐ المقارنة مع الموجود
             cur.execute(f"SELECT * FROM {table} WHERE {pk_col}=?", (pk_val,))
             ex = cur.fetchone()
             if ex:
                 ex_dict = dict(ex)
                 local_ts = ex_dict.get('updated_at') or ''
+                # ⭐ اللي عنده updated_at أحدث يفوز
                 if local_ts and in_ts and local_ts > in_ts:
                     skipped += 1
                     continue
 
+            # ⭐ الأعمدة المشتركة
             cols = [c for c in incoming.keys() if c in table_cols]
             if not cols:
                 skipped += 1
                 continue
             vals = [incoming[c] for c in cols]
 
+            # ⭐ نضيف updated_at لو مش موجود
             if has_updated_at and 'updated_at' not in cols:
                 cols.append('updated_at')
                 vals.append(in_ts or datetime.now().isoformat())
@@ -195,7 +284,7 @@ def _apply_table(conn, table, rows):
 
 
 def apply_snapshot(snap, db_path=None):
-    """يطبق snapshot على الـ DB المحدد"""
+    """يطبق snapshot على DB"""
     db_path = db_path or get_local_db()
 
     if not snap or 'dbs' not in snap:
@@ -203,17 +292,21 @@ def apply_snapshot(snap, db_path=None):
 
     ta = ts = te = 0
 
+    # ⭐ DB الأساسية
     main = snap.get('dbs', {}).get('main', {})
     if db_path and os.path.exists(db_path) and main:
         with sqlite3.connect(db_path, timeout=30) as conn:
             for table, rows in main.items():
                 if table not in SYNC_TABLES:
                     continue
-                a, s, e = _apply_table(conn, table, rows)
-                ta += a; ts += s; te += e
+                pk_col = SYNC_TABLES[table]
+                a, s, e = _apply_table(conn, table, rows, pk_col)
+                ta += a;
+                ts += s;
+                te += e
             conn.commit()
 
-    # registry
+    # ⭐ Registry
     reg = get_registry_db()
     reg_data = snap.get('dbs', {}).get('registry', {})
     if os.path.exists(reg) and reg_data:
@@ -221,101 +314,25 @@ def apply_snapshot(snap, db_path=None):
             for table, rows in reg_data.items():
                 if table not in SYNC_TABLES:
                     continue
-                a, s, e = _apply_table(conn, table, rows)
-                ta += a; ts += s; te += e
+                pk_col = SYNC_TABLES[table]
+                a, s, e = _apply_table(conn, table, rows, pk_col)
+                ta += a;
+                ts += s;
+                te += e
             conn.commit()
 
     return {'applied': ta, 'skipped': ts, 'errors': te}
+
+
 # ============================================================
-# Gist
+# ⭐ Merge: دمج snapshots (LWW)
 # ============================================================
-def _gist_read(file_name='sync_state.json'):
-    if not GITHUB_TOKEN or not GIST_ID:
-        return None
-    try:
-        r = requests.get(
-            f'https://api.github.com/gists/{GIST_ID}',
-            headers={'Authorization': f'token {GITHUB_TOKEN}'},
-            timeout=30
-        )
-        if r.status_code != 200:
-            return None
-
-        files = r.json().get('files', {})
-        file_info = files.get(file_name)
-        if not file_info:
-            return {}
-
-        content = file_info.get('content', '')
-
-        # ⭐ لو المحتوى فاضي أو مقطوع، نستخدم raw_url
-        if not content or file_info.get('truncated'):
-            raw_url = file_info.get('raw_url')
-            if raw_url:
-                try:
-                    rr = requests.get(raw_url, timeout=60)
-                    if rr.status_code == 200:
-                        content = rr.text
-                except Exception as e:
-                    print(f"[gist_read raw] {e}")
-
-        if not content:
-            return {}
-
-        # ⭐ لو الملف مضغوط (يبدأ بـ GZIP:)
-        if content.startswith('GZIP:'):
-            try:
-                raw = base64.b64decode(content[5:])
-                decompressed = gzip.decompress(raw)
-                return json.loads(decompressed.decode('utf-8'))
-            except Exception as e:
-                print(f"[gist_read decompress] {e}")
-                return {}
-
-        return json.loads(content)
-    except Exception as e:
-        print(f"[gist_read] {e}")
-        return None
-
-
-def _gist_write(data, file_name='sync_state.json'):
-    if not GITHUB_TOKEN or not GIST_ID:
-        return False
-    try:
-        # ⭐ اضغط البيانات
-        payload = json.dumps(data, ensure_ascii=False, default=str)
-        compressed = gzip.compress(payload.encode('utf-8'))
-        b64 = base64.b64encode(compressed).decode('ascii')
-        content = 'GZIP:' + b64
-
-        # ⭐ PATCH بسيط — GitHub بيحفظ الملفات التانية تلقائيًا
-        r = requests.patch(
-            f'https://api.github.com/gists/{GIST_ID}',
-            headers={'Authorization': f'token {GITHUB_TOKEN}'},
-            json={'files': {file_name: {'content': content}}},
-            timeout=120
-        )
-        return r.status_code == 200
-    except Exception as e:
-        print(f"[gist_write] {e}")
-        return False
-# ============================================================
-# Public API
-# ============================================================
-
 def _merge_snapshots(remote, local):
-    """
-    يدمج snapshot السيرفر مع snapshot الجهاز الحالي
-    - لكل سجل: اللي عنده updated_at أحدث يفوز
-    - السجلات الجديدة من أي جهاز تتضاف
-    """
+    """يدمج snapshot السيرفر مع الجهاز الحالي"""
     merged = {
         'device_id': DEVICE_ID,
         'timestamp': datetime.now().isoformat(),
-        'dbs': {
-            'main': {},
-            'registry': {},
-        }
+        'dbs': {'main': {}, 'registry': {}},
     }
 
     r_dbs = (remote or {}).get('dbs', {})
@@ -331,18 +348,15 @@ def _merge_snapshots(remote, local):
             r_rows = r_tables.get(table, {})
             l_rows = l_tables.get(table, {})
 
-            # ابدأ بالسجلات من السيرفر
             combined = dict(r_rows)
 
-            # ضيف/حدّث من المحلي
             for pk, l_entry in l_rows.items():
                 if pk not in combined:
-                    # سجل جديد من المحلي
                     combined[pk] = l_entry
                 else:
-                    # نفس السجل موجود في الاتنين → اللي updated_at أحدث يفوز
                     r_ts = combined[pk].get('_updated_at') or ''
                     l_ts = l_entry.get('_updated_at') or ''
+                    # ⭐ اللي عنده updated_at أحدث يفوز
                     if l_ts >= r_ts:
                         combined[pk] = l_entry
 
@@ -351,12 +365,9 @@ def _merge_snapshots(remote, local):
     return merged
 
 
-def _count_records(snap):
-    total = 0
-    for db_key, tables in snap.get('dbs', {}).items():
-        for table_name, rows in tables.items():
-            total += len(rows)
-    return total
+# ============================================================
+# ⭐ Public API
+# ============================================================
 def push_full_sync(db_path=None, garage_key='default'):
     """يرفع snapshot للجراج المحدد"""
     db_path = db_path or get_local_db()
@@ -364,6 +375,7 @@ def push_full_sync(db_path=None, garage_key='default'):
 
     local_snap = take_snapshot(db_path=db_path)
 
+    # ⭐ نتأكد إن عندنا داتا
     has_data = False
     for db_key, tables in local_snap.get('dbs', {}).items():
         for table_name, rows in tables.items():
@@ -376,9 +388,10 @@ def push_full_sync(db_path=None, garage_key='default'):
     if not has_data:
         return {
             'ok': False,
-            'error': 'الجهاز الحالي فاضي — مش هرفع snapshot فاضي'
+            'error': 'الجهاز فاضي — مش هرفع snapshot فاضي'
         }
 
+    # ⭐ نقرأ الـ remote وندمج
     remote_snap = _gist_read(file_name) or {}
     merged = _merge_snapshots(remote_snap, local_snap)
 
@@ -409,21 +422,18 @@ def pull_full_sync(db_path=None, garage_key='default'):
 
 
 def sync_both_ways(db_path=None, garage_key='default'):
-    """مزامنة كاملة للجراج المحدد"""
+    """مزامنة كاملة"""
     db_path = db_path or get_local_db()
-    file_name = f'sync_state_{garage_key}.json'
 
-    remote = _gist_read(file_name) or {}
-    if remote and remote.get('dbs'):
-        pull_result = apply_snapshot(remote, db_path=db_path)
-    else:
-        pull_result = {'applied': 0, 'skipped': 0, 'errors': 0}
+    # 1) اسحب من Gist وطبق
+    pull_result = pull_full_sync(db_path=db_path, garage_key=garage_key)
 
+    # 2) ارفع snapshot محدّث
     push_result = push_full_sync(db_path=db_path, garage_key=garage_key)
 
     return {
         'ok': push_result.get('ok') or pull_result.get('applied', 0) > 0,
-        'pulled': pull_result,
+        'pulled': pull_result if pull_result.get('ok') else {'applied': 0, 'skipped': 0, 'errors': 0},
         'pushed_ok': push_result.get('ok'),
         'pushed_error': push_result.get('error'),
         'pushed_device': push_result.get('device_id'),
@@ -432,7 +442,7 @@ def sync_both_ways(db_path=None, garage_key='default'):
 
 
 def get_status(garage_key='default'):
-    """حالة المزامنة للجراج المحدد"""
+    """حالة المزامنة"""
     file_name = f'sync_state_{garage_key}.json'
     info = {
         'device_id': DEVICE_ID,

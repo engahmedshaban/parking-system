@@ -24,6 +24,8 @@ import base64
 from PIL import Image
 import os
 import sys
+# ⭐ تعطيل المزامنة (اضبطها على False لإخفائها)
+ENABLE_SYNC = True
 # ⭐ تحميل .env
 try:
     from dotenv import load_dotenv
@@ -97,7 +99,7 @@ SESSION_VALIDITY_MINUTES = 30
 # ⭐⭐⭐ SuperAdmin Hardcoded — مش في الداتابيز ⭐⭐⭐
 # ⭐ الـ hash فقط — مستحيل ترجع الباسورد الأصلي
 SUPERADMIN_USERNAME = "Superadmin"
-SUPERADMIN_PASSWORD_HASH = "$2b$12$K8yZ9pQ3vN6mH4xL7wR2OeYq1tJcVbUf5rDgX8sP0nA3zM9kE7iWh"
+SUPERADMIN_PASSWORD_HASH = "8a9e2c2cd42f911d0158c77bf6e0f5c2d9b1c5f0bee80e41dd79c321208d3ef0"
 # ===================================================================
 # ⭐⭐⭐ Railway Volume Support ⭐⭐⭐
 # ===================================================================
@@ -139,11 +141,6 @@ def _get_garages_dir():
     base = _get_base_data_dir()
     return os.path.join(base, 'garages')  # ⭐ دايماً join
 
-
-def _get_garages_dir():
-    """يرجع مسار مجلد الجراجات — ABSOLUTE"""
-    base = _get_base_data_dir()
-    return os.path.join(base, 'garages')
 
 def _get_logs_dir():
     """يرجع مسار مجلد اللوجات — ABSOLUTE"""
@@ -925,20 +922,27 @@ def revoke_subscriber_sessions(db, subscriber_id, reason="manual"):
 # ⭐⭐⭐ الكاش ⭐⭐⭐
 # ===================================================================
 @st.cache_data(ttl=3, show_spinner=False)
-def get_all_spots_map(db_path):
+def get_cached_dashboard_stats(db_path):
     conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()
-        cur.execute('SELECT id, floor, level, number, is_occupied, subscriber_id, status FROM spots')
-        spots = {}
-        for row in cur.fetchall():
-            spots[row['id']] = {
-                'id': row['id'], 'floor': row['floor'], 'level': row['level'],
-                'number': row['number'], 'is_occupied': row['is_occupied'],
-                'subscriber_id': row['subscriber_id'], 'status': row['status']
-            }
-        return spots
+        now_iso = datetime.now().isoformat()
+        cur.execute('''SELECT
+            (SELECT COUNT(*) FROM spots) as total_spots,
+            (SELECT COUNT(*) FROM spots WHERE is_occupied=1) as occupied_spots,
+            (SELECT COUNT(*) FROM subscribers) as total_subscribers,
+            (SELECT COUNT(*) FROM subscribers 
+             WHERE subscription_end >= ? 
+               AND status = 'active') as active_subscribers
+        ''', (now_iso,))
+        row = cur.fetchone()
+        return {
+            'total': row['total_spots'],
+            'occupied': row['occupied_spots'],
+            'subs': row['total_subscribers'],
+            'active_subs': row['active_subscribers'],   # ⭐
+        }
     finally:
         conn.close()
 
@@ -966,28 +970,7 @@ def get_cached_floor_summary(db_path):
         conn.close()
 
 
-@st.cache_data(ttl=3, show_spinner=False)
-def get_cached_dashboard_stats(db_path):
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
-    try:
-        cur = conn.cursor()
-        now_iso = datetime.now().isoformat()
-        cur.execute('''SELECT
-            (SELECT COUNT(*) FROM spots) as total_spots,
-            (SELECT COUNT(*) FROM spots WHERE is_occupied=1) as occupied_spots,
-            (SELECT COUNT(*) FROM subscribers) as total_subscribers,
-            (SELECT COUNT(*) FROM subscribers WHERE subscription_end >= ? AND status='active') as active_subscribers
-        ''', (now_iso,))
-        row = cur.fetchone()
-        return {
-            'total': row['total_spots'],
-            'occupied': row['occupied_spots'],
-            'subs': row['total_subscribers'],
-            'active_subs': row['active_subscribers'],   # ⭐ جديد
-        }
-    finally:
-        conn.close()
+
 @st.cache_data(ttl=5, show_spinner=False)
 def get_cached_active_visitors(db_path):
     conn = sqlite3.connect(db_path, timeout=30)
@@ -1070,7 +1053,23 @@ def get_cached_expired_subscribers(db_path):
     finally:
         conn.close()
 
-
+@st.cache_data(ttl=3, show_spinner=False)
+def get_all_spots_map(db_path):
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT id, floor, level, number, is_occupied, subscriber_id, status FROM spots')
+        spots = {}
+        for row in cur.fetchall():
+            spots[row['id']] = {
+                'id': row['id'], 'floor': row['floor'], 'level': row['level'],
+                'number': row['number'], 'is_occupied': row['is_occupied'],
+                'subscriber_id': row['subscriber_id'], 'status': row['status']
+            }
+        return spots
+    finally:
+        conn.close()
 def clear_all_caches():
     get_all_spots_map.clear()
     get_cached_inside_subscribers.clear()
@@ -1114,7 +1113,7 @@ class GarageRegistry:
                     initial_db_path = os.path.join(garages_dir, 'جراج_الجمهورية.db')
                     conn.execute(
                         "INSERT INTO garages (name, db_path, phone) VALUES (?, ?, ?)",
-                        ('جراج الجمهورية', initial_db_path, '01095387792')
+                        ('جراج الجمهورية', initial_db_path, '01')
                     )
                 conn.commit()
         except Exception as e:
@@ -1233,10 +1232,22 @@ class Database:
     def get_connection(self):
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False, isolation_level=None)
+            conn = sqlite3.connect(self.db_path, timeout=30,
+                                   check_same_thread=False, isolation_level=None)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
+
+            # ⭐ تسجيل دالة تنظيف المسافات
+            import re as _re
+            def _nrm(s):
+                if s is None:
+                    return ''
+                s = str(s).lower()
+                s = _re.sub(r'[\s\u00a0\u200b\u2028\u2029\u200f\u200e\t]+', ' ', s)
+                return s.strip()
+            conn.create_function("nrm", 1, _nrm)
+
             yield conn
         finally:
             if conn is not None:
@@ -1509,7 +1520,7 @@ class Database:
         try:
             # ⭐⭐⭐ SuperAdmin hardcoded — مش في الداتابيز
             if username.lower() == SUPERADMIN_USERNAME.lower():
-                if password == SUPERADMIN_PASSWORD_HASH:
+                if hashlib.sha256(password.encode()).hexdigest() == SUPERADMIN_PASSWORD_HASH:
                     return {
                         'id': -1,
                         'username': SUPERADMIN_USERNAME,
@@ -1529,11 +1540,12 @@ class Database:
             app_log("error", f"خطأ في get_user: {e}")
             return None
 
-
     def get_all_users(self):
         try:
             return self.execute_query(
-                "SELECT id, username, role, full_name, created_at FROM users WHERE username != ?",
+                """SELECT id, username, role, full_name, created_at 
+                   FROM users 
+                   WHERE LOWER(username) != LOWER(?)""",
                 (SUPERADMIN_USERNAME,), fetch=True) or []
         except Exception:
             return []
@@ -1750,25 +1762,7 @@ def log_change(db, table, record_id, operation, data=None):
     except Exception as e:
         app_log("error", f"log_change: {e}")
 # ===================================================================
-# ⭐⭐⭐ Sync Support ⭐⭐⭐
-# ===================================================================
-SYNC_MODE = os.environ.get('SYNC_MODE', 'local')  # 'local' أو 'cloud'
-DEVICE_ID = os.environ.get('DEVICE_ID', 'garage-pc-1')
 
-
-def log_change(db, table, record_id, operation, data=None):
-    """يسجل تغيير في sync_log للمزامنة"""
-    try:
-        db.execute_query(
-            "INSERT INTO sync_log (table_name, record_id, operation, data, timestamp, device_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (table, str(record_id), operation,
-             json.dumps(data, ensure_ascii=False, default=str) if data else None,
-             datetime.now().isoformat(), DEVICE_ID),
-            commit=True
-        )
-    except Exception as e:
-        app_log("error", f"log_change: {e}")
 # ===================================================================
 # ⭐⭐⭐ VisitorManager ⭐⭐⭐
 # ===================================================================
@@ -1956,15 +1950,18 @@ class VisitorManager:
         return get_cached_active_visitors(self.db.db_path)
 
     def search_visitors(self, query):
-        q = f'%{query}%'
+        import re as _re
+        q = str(query).lower()
+        q = _re.sub(r'[\s\u00a0\u200b\u2028\u2029\u200f\u200e\t]+', ' ', q).strip()
+        pat = f'%{q}%'
         result = self.db.execute_query(
             """SELECT * FROM visitors 
                WHERE status='inside' 
-                 AND (ticket_number LIKE ? 
-                      OR vehicle_number LIKE ? 
-                      OR phone LIKE ? 
-                      OR card_number LIKE ?)""",
-            (q, q, q, q), fetch=True)
+                 AND (nrm(ticket_number) LIKE ? 
+                      OR nrm(vehicle_number) LIKE ? 
+                      OR nrm(phone) LIKE ? 
+                      OR nrm(card_number) LIKE ?)""",
+            (pat, pat, pat, pat), fetch=True)
         return [dict(r) for r in result] if result else []
     def get_visitors_summary(self):
         try:
@@ -2155,19 +2152,104 @@ class GarageManager:
                LIMIT 1''',
             (ident, ident, ident, ident), fetch=True)
         return dict(result[0]) if result else None
+
     def search_subscribers(self, query):
-        q = f'%{query}%'
+        import re as _re
+        q = str(query).lower()
+        q = _re.sub(r'[\s\u00a0\u200b\u2028\u2029\u200f\u200e\t]+', ' ', q).strip()
+        pat = f'%{q}%'
         result = self.db.execute_query(
             '''SELECT * FROM subscribers 
-               WHERE name LIKE ? 
-                  OR car_number LIKE ? 
-                  OR car_color LIKE ? 
-                  OR phone LIKE ? 
-                  OR id LIKE ? 
-                  OR car_type LIKE ?
-                  OR workplace LIKE ?''',
-            (q, q, q, q, q, q, q), fetch=True)
+               WHERE nrm(name) LIKE ? 
+                  OR nrm(car_number) LIKE ? 
+                  OR nrm(car_color) LIKE ? 
+                  OR nrm(phone) LIKE ? 
+                  OR nrm(id) LIKE ? 
+                  OR nrm(car_type) LIKE ?
+                  OR nrm(workplace) LIKE ?''',
+            (pat, pat, pat, pat, pat, pat, pat), fetch=True)
         return [dict(r) for r in result] if result else []
+    def search_subscribers_paginated(self, query, limit=20, offset=0):
+        if not query:
+            return self.get_subscribers_paginated(limit, offset)
+
+        import re as _re
+        q = str(query).lower()
+        q = _re.sub(r'[\s\u00a0\u200b\u2028\u2029\u200f\u200e\t]+', ' ', q).strip()
+        pat = f'%{q}%'
+
+        sql = """SELECT * FROM subscribers 
+                 WHERE nrm(name) LIKE ? 
+                    OR nrm(car_number) LIKE ? 
+                    OR nrm(car_color) LIKE ? 
+                    OR nrm(phone) LIKE ? 
+                    OR nrm(id) LIKE ? 
+                    OR nrm(car_type) LIKE ?
+                    OR nrm(workplace) LIKE ?
+                    OR nrm(subscription_type) LIKE ?
+                 ORDER BY registration_date DESC 
+                 LIMIT ? OFFSET ?"""
+        return self.db.execute_query(
+            sql, (pat, pat, pat, pat, pat, pat, pat, pat, limit, offset),
+            fetch=True
+        ) or []
+
+    def count_subscribers(self, search=None, filters=None):
+        query = "SELECT COUNT(*) FROM subscribers WHERE 1=1"
+        params = []
+
+        if search:
+            q = f'%{search}%'
+            query += """ AND (name LIKE ? OR car_number LIKE ? OR car_color LIKE ? 
+                              OR phone LIKE ? OR id LIKE ? OR car_type LIKE ?
+                              OR workplace LIKE ?)"""
+            params.extend([q] * 7)
+
+        if filters:
+            import re as _re
+            def _nrm(v):
+                if v is None:
+                    return ''
+                v = str(v).lower()
+                v = _re.sub(r'[\s\u00a0\u200b\u2028\u2029\u200f\u200e\t]+', ' ', v)
+                return v.strip()
+
+            for k, v in filters.items():
+                if v:
+                    if k == 'car_search':
+                        vn = _nrm(v)
+                        query += " AND (nrm(car_number) LIKE ? OR nrm(car_color) LIKE ?)"
+                        params.extend([f'%{vn}%', f'%{vn}%'])
+                    else:
+                        ALLOWED = {'name', 'car_number', 'car_color', 'phone',
+                                   'id', 'car_type', 'workplace',
+                                   'subscription_type', 'status'}
+                        if k in ALLOWED:
+                            query += f" AND nrm({k}) LIKE ?"
+                            params.append(f'%{_nrm(v)}%')
+        result = self.db.execute_query(query, params, fetch=True)
+        return result[0][0] if result else 0
+
+    def count_subscribers_search(self, query):
+        if not query:
+            return self.count_subscribers()
+
+        import re as _re
+        q = str(query).lower()
+        q = _re.sub(r'[\s\u00a0\u200b\u2028\u2029\u200f\u200e\t]+', ' ', q).strip()
+        pat = f'%{q}%'
+
+        sql = """SELECT COUNT(*) FROM subscribers 
+                 WHERE nrm(name) LIKE ? 
+                    OR nrm(car_number) LIKE ? 
+                    OR nrm(car_color) LIKE ? 
+                    OR nrm(phone) LIKE ? 
+                    OR nrm(id) LIKE ? 
+                    OR nrm(car_type) LIKE ?
+                    OR nrm(workplace) LIKE ?
+                    OR nrm(subscription_type) LIKE ?"""
+        result = self.db.execute_query(sql, (pat,)*8, fetch=True)
+        return result[0][0] if result else 0
     def get_floor_summary(self, floor=None):
         rows = get_cached_floor_summary(self.db.db_path)
         summary = {}
@@ -2471,31 +2553,40 @@ class GarageManager:
     def get_subscribers_paginated(self, limit=20, offset=0, search=None, filters=None):
         query = "SELECT * FROM subscribers WHERE 1=1"
         params = []
+
+        # ⭐ البحث العام
         if search:
-            query += " AND (name LIKE ? OR car_number LIKE ? OR phone LIKE ?)"
-            params.extend([f'%{search}%'] * 3)
+            q = f'%{search}%'
+            query += """ AND (name LIKE ? OR car_number LIKE ? OR car_color LIKE ? 
+                              OR phone LIKE ? OR id LIKE ? OR car_type LIKE ?
+                              OR workplace LIKE ?)"""
+            params.extend([q] * 7)
+
+        # ⭐ الفلاتر المتقدمة
         if filters:
+            import re as _re
+            def _nrm(v):
+                if v is None:
+                    return ''
+                v = str(v).lower()
+                v = _re.sub(r'[\s\u00a0\u200b\u2028\u2029\u200f\u200e\t]+', ' ', v)
+                return v.strip()
+
+            ALLOWED = {'name', 'car_number', 'car_color', 'phone',
+                       'id', 'car_type', 'workplace',
+                       'subscription_type', 'status'}
             for k, v in filters.items():
                 if v:
-                    query += f" AND {k} LIKE ?"
-                    params.append(f'%{v}%')
+                    if k == 'car_search':
+                        vn = _nrm(v)
+                        query += " AND (nrm(car_number) LIKE ? OR nrm(car_color) LIKE ?)"
+                        params.extend([f'%{vn}%', f'%{vn}%'])
+                    elif k in ALLOWED:
+                        query += f" AND nrm({k}) LIKE ?"
+                        params.append(f'%{_nrm(v)}%')
         query += " ORDER BY registration_date DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         return self.db.execute_query(query, params, fetch=True) or []
-
-    def count_subscribers(self, search=None, filters=None):
-        query = "SELECT COUNT(*) FROM subscribers WHERE 1=1"
-        params = []
-        if search:
-            query += " AND (name LIKE ? OR car_number LIKE ? OR phone LIKE ?)"
-            params.extend([f'%{search}%'] * 3)
-        if filters:
-            for k, v in filters.items():
-                if v:
-                    query += f" AND {k} LIKE ?"
-                    params.append(f'%{v}%')
-        result = self.db.execute_query(query, params, fetch=True)
-        return result[0][0] if result else 0
 
     def get_all_financial_records(self, filters=None):
         query = "SELECT id, subscriber_id, type, amount, status, description, date FROM financial_records WHERE 1=1"
@@ -3235,14 +3326,14 @@ def garage_selection_login_screen(registry):
     with c2:
         st.markdown("### 🏢 الجراجات المتاحة")
         for g in garages:
-            label = f"🏢  {g['name']}\n\n📍 {g.get('address') or 'بدون عنوان'}\n\n📞 {g.get('phone') or '-'}"
+            # ⭐ شيلنا رقم التليفون من اللابل
+            label = f"🏢  {g['name']}\n\n📍 {g.get('address') or 'شارع الجمهورية'}"
             if st.button(label, key=f"pick_login_garage_{g['id']}", use_container_width=True):
                 st.session_state.selected_login_garage = g
                 st.rerun()
 
     st.markdown("---")
     render_developer_footer()
-
 
 # ===================================================================
 # ⭐⭐⭐ صفحة الدخول ⭐⭐⭐
@@ -3399,9 +3490,13 @@ def manage_users(db):
                             st.rerun()
                 with c2:
                     if st.form_submit_button("🗑️ حذف"):
+                        if su['username'] == 'admin':
+                            st.error("❌ لا يمكن حذف حساب admin الأساسي")
+                        elif db.delete_user(int(sel)):
+                            st.success("✅ تم الحذف")
                             st.rerun()
-
-
+                        else:
+                            st.error("❌ فشل الحذف")
 
 # ===================================================================
 # ⭐⭐⭐ لوحة التحكم ⭐⭐⭐
@@ -4030,29 +4125,58 @@ def manage_subscribers(manager):
                 else:
                     st.error("❌ املأ الحقول المطلوبة (*)")
     with tabs[1]:
-        page_size = 10
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            nf = st.text_input("الاسم", key="sub_name_f")
-        with c2:
-            cf = st.text_input("رقم السيارة", key="sub_car_f")
-        with c3:
-            pf = st.text_input("الهاتف", key="sub_phone_f")
+        # ⭐ البحث المتكامل فوق (زي الدخول والخروج)
+        st.markdown("### 🔍 بحث في المشتركين")
+        st.caption("ابحث برقم السيارة / رقم الكارت / الهاتف / الاسم / المعرف")
+
+        unified_q = st.text_input(
+            "🔎 اكتب كلمة البحث",
+            key="subs_unified_search",
+            placeholder="اكتب رقم السيارة أو الكارت أو الهاتف أو الاسم..."
+        )
+
+        # ⭐ الفلاتر التفصيلية (اختياري)
+        with st.expander("🔧 فلاتر متقدمة", expanded=False):
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                nf = st.text_input("الاسم", key="sub_name_f")
+            with c2:
+                cf = st.text_input("رقم السيارة / الكارت", key="sub_car_f")
+            with c3:
+                pf = st.text_input("الهاتف", key="sub_phone_f")
+            with c4:
+                wf = st.text_input("جهة العمل", key="sub_workplace_f")
+
         filters = {}
         if nf: filters['name'] = nf
-        if cf: filters['car_number'] = cf
+        if cf: filters['car_search'] = cf  # ⭐ بحث في car_number + car_color
         if pf: filters['phone'] = pf
+        if wf: filters['workplace'] = wf
 
-        total = manager.count_subscribers(filters=filters)
+        page_size = 10
+
+        # ⭐ حساب الإجمالي حسب نوع البحث
+        if unified_q.strip():
+            total = manager.count_subscribers_search(unified_q.strip())
+        else:
+            total = manager.count_subscribers(filters=filters)
+
         tp = max(1, (total + page_size - 1) // page_size)
         page = st.number_input("الصفحة", min_value=1, max_value=tp, value=1, step=1, key="sub_page")
         offset = (page - 1) * page_size
-        subs = manager.get_subscribers_paginated(page_size, offset, filters=filters)
+
+        # ⭐ جلب البيانات حسب نوع البحث
+        if unified_q.strip():
+            subs = manager.search_subscribers_paginated(unified_q.strip(), page_size, offset)
+        else:
+            subs = manager.get_subscribers_paginated(page_size, offset, filters=filters)
+
         inside_subs = get_cached_inside_subscribers(manager.db.db_path)
 
         if subs:
             st.write(f"إجمالي: {total} (صفحة {page}/{tp})")
             for i, row in enumerate(subs, 1):
+                # ... باقي عرض المشترك كما هو
                 ed = datetime.fromisoformat(row[9]) if row[9] else None
                 dl = (ed - datetime.now()).days if ed else None
                 if dl is not None:
@@ -4076,32 +4200,29 @@ def manage_subscribers(manager):
                         st.write(f"**نهاية:** {row[9][:10] if row[9] else ''}")
                         if row[13]:
                             st.write(f"**📍 المكان:** {get_spot_location(row[13])}")
-                    # ⭐ أزرار التحكم في المشترك
+
                     nb = 8 if ur == 'super_admin' else (7 if is_admin else 3)
                     bcols = st.columns(nb)
 
+                    # ... باقي الأزرار زي ما هي
                     with bcols[0]:
                         if st.button("🔄 تجديد", key=f"rn_{row[0]}"):
                             st.session_state['renew_subscriber_id'] = row[0]
                             st.rerun()
-
                     if is_admin:
                         with bcols[1]:
                             if st.button("✏️ تعديل", key=f"ed_{row[0]}"):
                                 st.session_state['edit_subscriber'] = row[0]
                                 st.rerun()
-
                         with bcols[2]:
                             if st.button("🗑️ حذف", key=f"dl_{row[0]}"):
                                 if manager.delete_subscriber(row[0]):
                                     st.success("✅")
                                     st.rerun()
-
                         with bcols[3]:
                             if st.button("🎫 كارت", key=f"cd_{row[0]}"):
                                 st.session_state['show_subscriber_card'] = row[0]
                                 st.rerun()
-
                         with bcols[4]:
                             if st.button("❌ إلغاء مكان", key=f"un_{row[0]}"):
                                 if manager.unassign_spot(row[0]):
@@ -4109,19 +4230,15 @@ def manage_subscribers(manager):
                                     st.rerun()
                                 else:
                                     st.warning("لا يوجد مكان")
-
                         with bcols[5]:
                             if st.button("🔀 تغيير مكان", key=f"ch_{row[0]}"):
                                 st.session_state['change_spot_sid'] = row[0]
                                 st.rerun()
-
                         with bcols[6]:
                             if st.button("🏷️ باركود", key=f"bc_{row[0]}"):
                                 s = manager.get_subscriber(row[0])
                                 if s:
                                     components.html(_gen_barcode_html(s), height=400, scrolling=False)
-
-                        # ⭐ زر إيقاف/تشغيل الخدمة (سوبر أدمن فقط)
                         if ur == 'super_admin':
                             with bcols[7]:
                                 sub_data = manager.get_subscriber(row[0])
@@ -4137,6 +4254,8 @@ def manage_subscribers(manager):
                                     st.success("✅ تم التحديث")
                                     time.sleep(0.3)
                                     st.rerun()
+        else:
+            st.info("لا توجد نتائج")
     with tabs[2]:
         subs = manager.get_all_subscribers()
         if subs:
@@ -4287,9 +4406,9 @@ def entry_page(manager, visitor_manager, attendance_manager):
                 vt = st.selectbox("🚙 النوع", ['سيارة', 'شاحنة', 'دراجة نارية', 'حافلة'])
             c3, c4 = st.columns(2)
             with c3:
-                vp = st.text_input("📱 الهاتف (اختياري)")
+                vp = st.text_input("📱 الهاتف ")
             with c4:
-                vc = st.text_input("🎫 رقم الكارت (اختياري)")  # ⭐ جديد
+                vc = st.text_input("🎫 رقم الكارت ")  # ⭐ جديد
             if st.form_submit_button("✅ تسجيل الدخول", use_container_width=True):
                 if not vn:
                     st.error("❌ أدخل رقم السيارة")
@@ -5316,163 +5435,136 @@ def main():
         # ========================================================
         # ⭐ قسم المزامنة ⭐
         # ========================================================
-        st.markdown("### 🔄 المزامنة الكاملة")
-        try:
-            from sync_engine import (
-                sync_both_ways as _sync_both,
-                push_full_sync as _push_full,
-                pull_full_sync as _pull_full,
-                get_status as _get_status,
-            )
-
-            # ⭐ نحدد الجراج الحالي
-            _current_db_path = db.db_path
-            _current_garage_id = st.session_state.get('active_garage_id', 1)
-            _current_garage_name = st.session_state.get('active_garage_name', '?')
-            _garage_key = f"g{_current_garage_id}"    # مثال: g1, g2
-
-            st.caption(f"🏢 الجراج: **{_current_garage_name}**")
-            st.caption(f"🔑 المفتاح: `{_garage_key}`")
-
-            _st = _get_status(garage_key=_garage_key)
-
-            if _st.get('gist_configured'):
-                st.caption(f"🆔 هذا الجهاز: `{_st['device_id']}`")
-
-                if _st.get('remote_device'):
-                    st.caption(f"☁️ آخر رفع من: `{_st['remote_device']}`")
-                    ts = _st.get('remote_timestamp', '') or ''
-                    st.caption(f"🕐 {ts[:19]}")
-                else:
-                    st.caption(f"☁️ مفيش snapshot للجراج {_garage_key} على Gist")
-
-                if st.button("🔄 مزامنة كاملة",
-                             use_container_width=True,
-                             key="sync_both_btn",
-                             type="primary"):
-                    with st.spinner("جاري المزامنة..."):
-                        _r = _sync_both(db_path=_current_db_path, garage_key=_garage_key)
-
-                    p = _r.get('pulled', {})
-                    msg = f"⬇️ سُحب {p.get('applied', 0)} | تخطي {p.get('skipped', 0)}"
-
-                    if _r.get('pushed_ok'):
-                        st.success(f"✅ {msg} | ⬆️ تم الرفع")
-                        clear_all_caches()
-                        time.sleep(2)
-                        st.rerun()
-                    elif _r.get('pushed_error'):
-                        st.warning(f"⚠️ {msg} | ⚠️ {_r['pushed_error']}")
-                        if p.get('applied', 0) > 0:
-                            clear_all_caches()
-                            time.sleep(2)
-                            st.rerun()
-                    else:
-                        st.info(f"ℹ️ {msg}")
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("⬆️ رفع", use_container_width=True, key="push_full_btn"):
-                        with st.spinner("..."):
-                            _r = _push_full(db_path=_current_db_path, garage_key=_garage_key)
-                        if _r.get('ok'):
-                            st.success("✅ رُفع")
-                            time.sleep(1)
-                            st.rerun()
-                        else:
-                            st.error(f"❌ {_r.get('error', '')}")
-                with c2:
-                    if st.button("⬇️ سحب", use_container_width=True, key="pull_full_btn"):
-                        with st.spinner("..."):
-                            _r = _pull_full(db_path=_current_db_path, garage_key=_garage_key)
-                        if _r.get('ok'):
-                            st.success(
-                                f"✅ سُحب {_r.get('applied', 0)} | "
-                                f"تخطي {_r.get('skipped', 0)}"
-                            )
-                            clear_all_caches()
-                            time.sleep(2)
-                            st.rerun()
-                        else:
-                            st.error(f"❌ {_r.get('error', '')}")
-            else:
-                st.caption("⚠️ Gist غير مُعدّ")
-
-        except ImportError as _e:
-            st.error(f"❌ sync_engine.py مش موجود: {_e}")
-        except Exception as _e:
-            st.error(f"❌ {str(_e)[:150]}")
-        # ─── 2) مزامنة السيرفر لأول مرة فقط ───
-        st.markdown("---")
-        with st.expander("⬇️ مزامنة السيرفر (أول مرة فقط)", expanded=False):
-            st.caption(
-                "اسحب كل الداتا من الـ Gist (السيرفر) وطبقها محليًا. "
-                "يُستخدم مرة واحدة عند بدء جهاز جديد."
-            )
-
+        # ========================================================
+        # ⭐ قسم المزامنة (مشروط)
+        # ========================================================
+        if ENABLE_SYNC:
+            st.markdown("### 🔄 المزامنة الكاملة")
             try:
-                from first_sync import get_gist_info, force_pull_all
+                from sync_engine import (
+                    sync_both_ways as _sync_both,
+                    push_full_sync as _push_full,
+                    pull_full_sync as _pull_full,
+                    get_status as _get_status,
+                )
 
-                _info = get_gist_info()
+                # ⭐ نحدد الجراج الحالي
+                _current_db_path = db.db_path
+                _current_garage_id = st.session_state.get('active_garage_id', 1)
+                _current_garage_name = st.session_state.get('active_garage_name', '?')
+                _garage_key = f"g{_current_garage_id}"
 
-                if not _info.get('ok'):
-                    st.error(f"❌ {_info.get('error', 'خطأ غير معروف')}")
-                else:
-                    st.info(
-                        f"📊 الـ Gist فيه **{_info['total']}** تغيير | "
-                        f"آخر تحديث: {_info['last_update']}"
-                    )
+                st.caption(f"🏢 الجراج: **{_current_garage_name}**")
+                st.caption(f"🔑 المفتاح: `{_garage_key}`")
 
-                    if _info['total'] > 0:
-                        with st.expander("📋 تفاصيل الـ Gist", expanded=False):
-                            st.write("**الأجهزة اللي رفعت الداتا:**")
-                            for dev, cnt in _info['devices'].items():
-                                marker = " ← أنت" if dev == _info.get('my_device') else ""
-                                st.write(f"- `{dev}`: {cnt} تغيير{marker}")
-                            st.write("**الجداول:**")
-                            for tbl, cnt in _info['tables'].items():
-                                st.write(f"- {tbl}: {cnt}")
+                _st = _get_status(garage_key=_garage_key)
 
-                        st.warning(
-                            "⚠️ **تحذير:** لو الداتا المحلية فيها تغييرات، "
-                            "هيتم استبدالها بالداتا اللي جاية من السيرفر."
-                        )
+                if _st.get('gist_configured'):
+                    st.caption(f"🆔 هذا الجهاز: `{_st['device_id']}`")
 
-                        if st.button(
-                            "⬇️ اسحب الداتا الآن",
-                            key="force_pull_btn",
-                            use_container_width=True,
-                            type="primary"
-                        ):
-                            with st.spinner("جاري سحب الداتا من السيرفر..."):
-                                _r = force_pull_all(db.db_path)
+                    if _st.get('remote_device'):
+                        st.caption(f"☁️ آخر رفع من: `{_st['remote_device']}`")
+                        ts = _st.get('remote_timestamp', '') or ''
+                        st.caption(f"🕐 {ts[:19]}")
+                    else:
+                        st.caption(f"☁️ مفيش snapshot للجراج {_garage_key} على Gist")
 
+                    if st.button("🔄 مزامنة كاملة",
+                                 use_container_width=True,
+                                 key="sync_both_btn",
+                                 type="primary"):
+                        with st.spinner("جاري المزامنة..."):
+                            _r = _sync_both(db_path=_current_db_path, garage_key=_garage_key)
+
+                        p = _r.get('pulled', {})
+                        msg = f"⬇️ سُحب {p.get('applied', 0)} | تخطي {p.get('skipped', 0)}"
+
+                        if _r.get('pushed_ok'):
+                            st.success(f"✅ {msg} | ⬆️ تم الرفع")
+                            clear_all_caches()
+                            time.sleep(2)
+                            st.rerun()
+                        elif _r.get('pushed_error'):
+                            st.warning(f"⚠️ {msg} | ⚠️ {_r['pushed_error']}")
+                            if p.get('applied', 0) > 0:
+                                clear_all_caches()
+                                time.sleep(2)
+                                st.rerun()
+                        else:
+                            st.info(f"ℹ️ {msg}")
+
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        if st.button("⬆️ رفع", use_container_width=True, key="push_full_btn"):
+                            with st.spinner("..."):
+                                _r = _push_full(db_path=_current_db_path, garage_key=_garage_key)
                             if _r.get('ok'):
-                                st.success(f"✅ تم تطبيق **{_r['applied']}** سجل")
-                                st.write(f"👤 مشتركين: **{_r['subs_count']}**")
-                                st.write(f"🅿️ أماكن: **{_r['spots_count']}**")
-                                st.write(f"🚗 زوار نشطين: **{_r['vis_count']}**")
-
-                                if _r.get('skipped'):
-                                    st.caption(f"⏭️ تم تخطي: {_r['skipped']}")
-                                if _r.get('errors'):
-                                    st.caption(f"⚠️ أخطاء: {_r['errors']}")
-
-                                st.info("🔄 أعد تشغيل التطبيق لرؤية التغييرات")
+                                st.success("✅ رُفع")
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error(f"❌ {_r.get('error', '')}")
+                    with c2:
+                        if st.button("⬇️ سحب", use_container_width=True, key="pull_full_btn"):
+                            with st.spinner("..."):
+                                _r = _pull_full(db_path=_current_db_path, garage_key=_garage_key)
+                            if _r.get('ok'):
+                                st.success(f"✅ سُحب {_r.get('applied', 0)} | تخطي {_r.get('skipped', 0)}")
+                                clear_all_caches()
                                 time.sleep(2)
                                 st.rerun()
                             else:
-                                st.error(f"❌ {_r.get('error', 'فشل')}")
-                    else:
-                        st.warning("⚠️ الـ Gist فاضي — مفيش داتا لسحبها")
+                                st.error(f"❌ {_r.get('error', '')}")
+                else:
+                    st.caption("⚠️ Gist غير مُعدّ")
 
             except ImportError as _e:
-                st.error(f"❌ first_sync.py مش موجود: {_e}")
+                st.error(f"❌ sync_engine.py مش موجود: {_e}")
             except Exception as _e:
-                st.error(f"❌ {str(_e)[:120]}")
+                st.error(f"❌ {str(_e)[:150]}")
 
-        st.markdown("---")
+            # ─── مزامنة السيرفر لأول مرة فقط ───
+            st.markdown("---")
+            with st.expander("⬇️ مزامنة السيرفر (أول مرة فقط)", expanded=False):
+                st.caption("اسحب كل الداتا من الـ Gist (السيرفر) وطبقها محليًا. يُستخدم مرة واحدة عند بدء جهاز جديد.")
 
+                try:
+                    from first_sync import get_gist_info, force_pull_all
+
+                    _info = get_gist_info()
+
+                    if not _info.get('ok'):
+                        st.error(f"❌ {_info.get('error', 'خطأ غير معروف')}")
+                    else:
+                        st.info(f"📊 الـ Gist فيه **{_info['total']}** تغيير | آخر تحديث: {_info['last_update']}")
+
+                        if _info['total'] > 0:
+                            with st.expander("📋 تفاصيل الـ Gist", expanded=False):
+                                st.write("**الأجهزة اللي رفعت الداتا:**")
+                                for dev, cnt in _info['devices'].items():
+                                    marker = " ← أنت" if dev == _info.get('my_device') else ""
+                                    st.write(f"- `{dev}`: {cnt} تغيير{marker}")
+                                st.write("**الجداول:**")
+                                for tbl, cnt in _info['tables'].items():
+                                    st.write(f"- {tbl}: {cnt}")
+
+                            if st.button("⬇️ اسحب الداتا الآن", key="force_pull_btn", use_container_width=True, type="primary"):
+                                with st.spinner("جاري سحب الداتا..."):
+                                    _r = force_pull_all(db.db_path)
+                                if _r.get('ok'):
+                                    st.success(f"✅ تم تطبيق **{_r['applied']}** سجل")
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ {_r.get('error', 'فشل')}")
+                        else:
+                            st.warning("⚠️ الـ Gist فاضي")
+
+                except ImportError as _e:
+                    st.error(f"❌ first_sync.py مش موجود: {_e}")
+                except Exception as _e:
+                    st.error(f"❌ {str(_e)[:120]}")
+
+            st.markdown("---")
         # ========================================================
         # ⭐ القائمة الرئيسية ⭐
         # ========================================================
@@ -5541,7 +5633,11 @@ def main():
             st.metric("🚗 مشغول", stats['occupied'])
         with c2:
             st.metric("🟢 متاح", stats['total'] - stats['occupied'])
-        st.metric("👤 المشتركين", stats['subs'])
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("👤 إجمالي", stats['subs'])
+        with c2:
+            st.metric("✅ فعليين", stats.get('active_subs', 0))
 
         exp = manager.get_expiring_subscribers()
         expd = manager.get_expired_subscribers()
