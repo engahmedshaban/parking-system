@@ -927,7 +927,7 @@ def revoke_subscriber_sessions(db, subscriber_id, reason="manual"):
 # ===================================================================
 # ⭐⭐⭐ الكاش ⭐⭐⭐
 # ===================================================================
-@st.cache_data(ttl=3, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_cached_dashboard_stats(db_path):
     db = Database(db_path)
     try:
@@ -951,7 +951,7 @@ def get_cached_dashboard_stats(db_path):
     except Exception:
         return {'total': 0, 'occupied': 0, 'subs': 0, 'active_subs': 0}
 
-@st.cache_data(ttl=3, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_cached_inside_subscribers(db_path):
     db = Database(db_path)
     try:
@@ -960,7 +960,7 @@ def get_cached_inside_subscribers(db_path):
     except Exception:
         return set()
 
-@st.cache_data(ttl=3, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_cached_floor_summary(db_path):
     db = Database(db_path)
     try:
@@ -969,7 +969,7 @@ def get_cached_floor_summary(db_path):
     except Exception:
         return []
 
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_cached_active_visitors(db_path):
     db = Database(db_path)
     try:
@@ -978,7 +978,7 @@ def get_cached_active_visitors(db_path):
     except Exception:
         return []
 
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_cached_inside_subscribers_data(db_path):
     db = Database(db_path)
     try:
@@ -992,7 +992,7 @@ def get_cached_inside_subscribers_data(db_path):
     except Exception:
         return []
 
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_cached_users_count(db_path):
     db = Database(db_path)
     result = {'entry': 0, 'exit': 0, 'admin': 0, 'manager': 0, 'subscriber': 0, 'super_admin': 0}
@@ -1005,7 +1005,7 @@ def get_cached_users_count(db_path):
     except Exception:
         return result
 
-@st.cache_data(ttl=15, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_cached_expiring_subscribers(db_path, days=7):
     db = Database(db_path)
     try:
@@ -1023,7 +1023,7 @@ def get_cached_expiring_subscribers(db_path, days=7):
     except Exception:
         return []
 
-@st.cache_data(ttl=15, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_cached_expired_subscribers(db_path):
     db = Database(db_path)
     try:
@@ -1040,7 +1040,7 @@ def get_cached_expired_subscribers(db_path):
     except Exception:
         return []
 
-@st.cache_data(ttl=3, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def get_all_spots_map(db_path):
     db = Database(db_path)
     try:
@@ -1711,7 +1711,7 @@ class VisitorManager:
                         cursor.execute("BEGIN IMMEDIATE")
                     cursor.execute("SELECT value FROM parking_settings WHERE key='last_visitor_ticket_number'")
                     row = cursor.fetchone()
-                    new = int(row[0]) + 1 if row else 1
+                    new = int(row['value']) + 1 if row else 1
                     if getattr(self.db, 'is_pg', False):
                         cursor.execute("UPDATE parking_settings SET value=%s WHERE key='last_visitor_ticket_number'", (str(new),))
                     else:
@@ -2075,9 +2075,9 @@ class GarageManager:
 
     def ensure_correct_spot_count(self):
         try:
-            result = self.db.execute_query('SELECT COUNT(*) FROM spots', fetch=True)
+            result = self.db.execute_query('SELECT COUNT(*) as cnt FROM spots', fetch=True)
             expected = self.get_total_spots_count()
-            if (result[0][0] if result else 0) != expected:
+            if (result[0]['cnt'] if result else 0) != expected:
                 self.init_spots()
         except Exception:
             pass
