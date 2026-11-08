@@ -1226,23 +1226,12 @@ class Database:
 
             if db_url:
                 self.is_pg = True
-                import sqlalchemy
+                import psycopg
                 from psycopg.rows import dict_row
 
-                db_url_pg3 = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
-
-                # ⭐ التعديل هنا: ضفنا pool_pre_ping عشان السرعة، و connect_args عشان يدعم القواميس
-                engine = sqlalchemy.create_engine(
-                    db_url_pg3,
-                    client_encoding='utf8',
-                    pool_pre_ping=True,
-                    connect_args={"row_factory": dict_row}
-                )
-
-                # ⭐ التعديل الجوهري: استخدام raw_connection عشان ندعم cursor
-                conn = engine.raw_connection()
+                # الاتصال بقاعدة البيانات مباشرة
+                conn = psycopg.connect(db_url, row_factory=dict_row, autocommit=True)
                 yield conn
-                conn.commit()
             else:
                 self.is_pg = False
                 import sqlite3
@@ -1270,7 +1259,6 @@ class Database:
     def execute_query(self, query, params=None, commit=False, fetch=False):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            # ⭐ تحويل علامة ? و nrm عشان يشتغلوا على PostgreSQL
             if getattr(self, 'is_pg', False):
                 query = query.replace('?', '%s')
                 query = query.replace('nrm(', 'LOWER(')

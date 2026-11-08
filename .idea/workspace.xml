@@ -7,7 +7,7 @@
     <list default="true" id="7a0fbe0c-3178-41d0-9d11-48523b6a15d4" name="Changes" comment="commit">
       <change afterPath="$PROJECT_DIR$/lastvv.py" afterDir="false" />
       <change afterPath="$PROJECT_DIR$/mainapp.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Lastv.py" beforeDir="false" afterPath="$PROJECT_DIR$/Lastv.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -155,22 +155,6 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1791387525635</updated>
-    </task>
-    <task id="LOCAL-00022" summary="commit">
-      <option name="closed" value="true" />
-      <created>1791416566445</created>
-      <option name="number" value="00022" />
-      <option name="presentableId" value="LOCAL-00022" />
-      <option name="project" value="LOCAL" />
-      <updated>1791416566445</updated>
-    </task>
-    <task id="LOCAL-00023" summary="commit">
-      <option name="closed" value="true" />
-      <created>1791417160167</created>
-      <option name="number" value="00023" />
-      <option name="presentableId" value="LOCAL-00023" />
-      <option name="project" value="LOCAL" />
-      <updated>1791417160167</updated>
     </task>
     <task id="LOCAL-00024" summary="commit">
       <option name="closed" value="true" />
@@ -548,7 +532,23 @@
       <option name="project" value="LOCAL" />
       <updated>1794174079163</updated>
     </task>
-    <option name="localTasksCounter" value="71" />
+    <task id="LOCAL-00071" summary="commit">
+      <option name="closed" value="true" />
+      <created>1794174695478</created>
+      <option name="number" value="00071" />
+      <option name="presentableId" value="LOCAL-00071" />
+      <option name="project" value="LOCAL" />
+      <updated>1794174695478</updated>
+    </task>
+    <task id="LOCAL-00072" summary="commit">
+      <option name="closed" value="true" />
+      <created>1794174742457</created>
+      <option name="number" value="00072" />
+      <option name="presentableId" value="LOCAL-00072" />
+      <option name="project" value="LOCAL" />
+      <updated>1794174742457</updated>
+    </task>
+    <option name="localTasksCounter" value="73" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
