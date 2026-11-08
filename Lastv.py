@@ -1227,18 +1227,20 @@ class Database:
             if db_url:
                 self.is_pg = True
                 import sqlalchemy
-                from sqlalchemy.pool import NullPool
-                from psycopg.rows import dict_row  # ⭐ استيراد dict_row
+                from psycopg.rows import dict_row
 
-                # ⭐ تعديل رابط الاتصال لاستخدام psycopg (v3)
                 db_url_pg3 = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
 
-                engine = sqlalchemy.create_engine(db_url_pg3, client_encoding='utf8', pool_pre_ping=True)
+                # ⭐ التعديل هنا: ضفنا pool_pre_ping عشان السرعة، و connect_args عشان يدعم القواميس
+                engine = sqlalchemy.create_engine(
+                    db_url_pg3,
+                    client_encoding='utf8',
+                    pool_pre_ping=True,
+                    connect_args={"row_factory": dict_row}
+                )
 
-                # ⭐ تمرير dict_row عند إنشاء الاتصال
-                conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
-                conn.connection.cursor_factory = dict_row
-
+                # ⭐ التعديل الجوهري: استخدام raw_connection عشان ندعم cursor
+                conn = engine.raw_connection()
                 yield conn
                 conn.commit()
             else:
@@ -1265,7 +1267,6 @@ class Database:
                     conn.close()
                 except Exception:
                     pass
-
     def execute_query(self, query, params=None, commit=False, fetch=False):
         with self.get_connection() as conn:
             cursor = conn.cursor()
