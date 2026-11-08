@@ -1193,7 +1193,12 @@ class GarageRegistry:
         except Exception:
             return False
 
-
+@st.cache_resource(show_spinner=False)
+def _get_pg_pool(db_url):
+    from psycopg_pool import ConnectionPool
+    from psycopg.rows import dict_row
+    # ⭐ بنفتح الاتصال مرة واحدة بس ونسيبه مفتوح (max_size=10)
+    return ConnectionPool(conninfo=db_url, kwargs={"row_factory": dict_row, "autocommit": True}, max_size=10)
 # ===================================================================
 # ⭐⭐⭐ قاعدة البيانات (Railway Volume Support) ⭐⭐⭐
 # ===================================================================
@@ -1226,12 +1231,10 @@ class Database:
 
             if db_url:
                 self.is_pg = True
-                import psycopg
-                from psycopg.rows import dict_row
-
-                # الاتصال بقاعدة البيانات مباشرة
-                conn = psycopg.connect(db_url, row_factory=dict_row, autocommit=True)
-                yield conn
+                # ⭐ هنا بنجيب الاتصال من الـ Pool اللي فوق (مش بنفتح واحد جديد)
+                pool = _get_pg_pool(db_url)
+                with pool.connection() as conn:
+                    yield conn
             else:
                 self.is_pg = False
                 import sqlite3
@@ -1251,7 +1254,7 @@ class Database:
                 conn.create_function("nrm", 1, _nrm)
                 yield conn
         finally:
-            if conn is not None:
+            if conn is not None and not self.is_pg:
                 try:
                     conn.close()
                 except Exception:
