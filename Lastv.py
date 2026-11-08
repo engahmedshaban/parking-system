@@ -1228,11 +1228,17 @@ class Database:
                 self.is_pg = True
                 import sqlalchemy
                 from sqlalchemy.pool import NullPool
-                import psycopg2.extras
+                from psycopg.rows import dict_row  # ⭐ استيراد dict_row
 
-                engine = sqlalchemy.create_engine(db_url, client_encoding='utf8', poolclass=NullPool)
-                conn = engine.connect()
-                conn.connection.cursor_factory = psycopg2.extras.RealDictCursor
+                # ⭐ تعديل رابط الاتصال لاستخدام psycopg (v3)
+                db_url_pg3 = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+
+                engine = sqlalchemy.create_engine(db_url_pg3, client_encoding='utf8', poolclass=NullPool)
+
+                # ⭐ تمرير dict_row عند إنشاء الاتصال
+                conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+                conn.connection.cursor_factory = dict_row
+
                 yield conn
                 conn.commit()
             else:
