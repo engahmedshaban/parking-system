@@ -303,19 +303,13 @@ def get_spot_location(spot_id):
 def get_next_movement_number(db):
     try:
         result = db.execute_query("SELECT value FROM parking_settings WHERE key='last_movement_number'", fetch=True)
-        if result:
-            new = int(result[0]['value']) + 1
-            db.execute_query("UPDATE parking_settings SET value=? WHERE key='last_movement_number'", (str(new),), commit=True)
-            return new
-        else:
-            if getattr(db, 'is_pg', False):
-                db.execute_query("INSERT INTO parking_settings (key, value) VALUES ('last_movement_number', '1') ON CONFLICT (key) DO NOTHING", commit=True)
-            else:
-                db.execute_query("INSERT OR IGNORE INTO parking_settings (key, value) VALUES ('last_movement_number', '1')", commit=True)
-            return 1
-    except Exception as e:
-        app_log("error", f"get_next_movement_number: {e}")
+        new = int(result[0]['value']) + 1 if result else 1
+        db.execute_query("UPDATE parking_settings SET value=? WHERE key='last_movement_number'", (str(new),), commit=True)
+        return new
+    except Exception:
+        db.execute_query("INSERT OR IGNORE INTO parking_settings (key, value) VALUES ('last_movement_number', '1')", commit=True)
         return 1
+
 
 def generate_qr_base64(data, color="#000000", box_size=6):
     try:
@@ -927,135 +921,155 @@ def revoke_subscriber_sessions(db, subscriber_id, reason="manual"):
 # ===================================================================
 # ⭐⭐⭐ الكاش ⭐⭐⭐
 # ===================================================================
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=3, show_spinner=False)
 def get_cached_dashboard_stats(db_path):
-    db = Database(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
     try:
+        cur = conn.cursor()
         now_iso = datetime.now().isoformat()
-        query = '''SELECT
+        cur.execute('''SELECT
             (SELECT COUNT(*) FROM spots) as total_spots,
             (SELECT COUNT(*) FROM spots WHERE is_occupied=1) as occupied_spots,
             (SELECT COUNT(*) FROM subscribers) as total_subscribers,
-            (SELECT COUNT(*) FROM subscribers WHERE subscription_end >= ? AND status = 'active') as active_subscribers
-        '''
-        result = db.execute_query(query, (now_iso,), fetch=True)
-        if result and len(result) > 0:
-            row = result[0]
-            return {
-                'total': row['total_spots'],
-                'occupied': row['occupied_spots'],
-                'subs': row['total_subscribers'],
-                'active_subs': row['active_subscribers'],
-            }
-        return {'total': 0, 'occupied': 0, 'subs': 0, 'active_subs': 0}
-    except Exception:
-        return {'total': 0, 'occupied': 0, 'subs': 0, 'active_subs': 0}
+            (SELECT COUNT(*) FROM subscribers 
+             WHERE subscription_end >= ? 
+               AND status = 'active') as active_subscribers
+        ''', (now_iso,))
+        row = cur.fetchone()
+        return {
+            'total': row['total_spots'],
+            'occupied': row['occupied_spots'],
+            'subs': row['total_subscribers'],
+            'active_subs': row['active_subscribers'],   # ⭐
+        }
+    finally:
+        conn.close()
 
-@st.cache_data(ttl=600, show_spinner=False)
+
+@st.cache_data(ttl=3, show_spinner=False)
 def get_cached_inside_subscribers(db_path):
-    db = Database(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     try:
-        result = db.execute_query("SELECT DISTINCT subscriber_id FROM subscriber_attendance WHERE status='inside'", fetch=True)
-        return {row['subscriber_id'] for row in result} if result else set()
-    except Exception:
-        return set()
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT subscriber_id FROM subscriber_attendance WHERE status='inside'")
+        return {row[0] for row in cur.fetchall()}
+    finally:
+        conn.close()
 
-@st.cache_data(ttl=600, show_spinner=False)
+
+@st.cache_data(ttl=3, show_spinner=False)
 def get_cached_floor_summary(db_path):
-    db = Database(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
     try:
-        result = db.execute_query('SELECT floor, level, COUNT(*) as total, COALESCE(SUM(is_occupied),0) as occ FROM spots GROUP BY floor, level', fetch=True)
-        return [dict(r) for r in result] if result else []
-    except Exception:
-        return []
+        cur = conn.cursor()
+        cur.execute('SELECT floor, level, COUNT(*) as total, COALESCE(SUM(is_occupied),0) as occ FROM spots GROUP BY floor, level')
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
 
-@st.cache_data(ttl=600, show_spinner=False)
+
+
+@st.cache_data(ttl=5, show_spinner=False)
 def get_cached_active_visitors(db_path):
-    db = Database(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
     try:
-        result = db.execute_query("SELECT * FROM visitors WHERE status='inside' ORDER BY entry_time DESC", fetch=True)
-        return [dict(r) for r in result] if result else []
-    except Exception:
-        return []
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM visitors WHERE status='inside' ORDER BY entry_time DESC")
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
 
-@st.cache_data(ttl=600, show_spinner=False)
+
+@st.cache_data(ttl=5, show_spinner=False)
 def get_cached_inside_subscribers_data(db_path):
-    db = Database(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
     try:
-        result = db.execute_query("""SELECT s.id, s.name, s.car_number, s.phone, s.car_type, s.spot_id,
+        cur = conn.cursor()
+        cur.execute("""SELECT s.id, s.name, s.car_number, s.phone, s.car_type, s.spot_id,
                               s.subscription_type, s.subscription_end, sa.entry_time
                        FROM subscriber_attendance sa
                        JOIN subscribers s ON s.id = sa.subscriber_id
                        WHERE sa.status='inside'
-                       ORDER BY sa.entry_time DESC""", fetch=True)
-        return [dict(r) for r in result] if result else []
-    except Exception:
-        return []
+                       ORDER BY sa.entry_time DESC""")
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
 
-@st.cache_data(ttl=600, show_spinner=False)
+
+@st.cache_data(ttl=5, show_spinner=False)
 def get_cached_users_count(db_path):
-    db = Database(db_path)
-    result = {'entry': 0, 'exit': 0, 'admin': 0, 'manager': 0, 'subscriber': 0, 'super_admin': 0}
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
     try:
-        rows = db.execute_query("SELECT role, COUNT(*) as cnt FROM users GROUP BY role", fetch=True)
-        if rows:
-            for row in rows:
-                result[row['role']] = row['cnt']
+        cur = conn.cursor()
+        cur.execute("SELECT role, COUNT(*) as cnt FROM users GROUP BY role")
+        result = {'entry': 0, 'exit': 0, 'admin': 0, 'manager': 0, 'subscriber': 0, 'super_admin': 0}
+        for row in cur.fetchall():
+            result[row['role']] = row['cnt']
         return result
-    except Exception:
-        return result
+    finally:
+        conn.close()
 
-@st.cache_data(ttl=600, show_spinner=False)
+
+@st.cache_data(ttl=15, show_spinner=False)
 def get_cached_expiring_subscribers(db_path, days=7):
-    db = Database(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
     try:
         now = datetime.now().isoformat()
         end = (datetime.now() + timedelta(days=days)).isoformat()
-        result = db.execute_query("SELECT id, name, car_number, phone, subscription_type, subscription_end FROM subscribers WHERE subscription_end >= ? AND subscription_end <= ? AND status='active'", (now, end), fetch=True)
-        ret = []
-        if result:
-            for row in result:
-                end_dt = datetime.fromisoformat(row['subscription_end'])
-                ret.append({'subscriber_id': row['id'], 'name': row['name'], 'car_number': row['car_number'],
-                               'phone': row['phone'], 'subscription_type': row['subscription_type'],
-                               'days_left': (end_dt - datetime.now()).days, 'end_date': end_dt})
-        return sorted(ret, key=lambda x: x['days_left'])
-    except Exception:
-        return []
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, car_number, phone, subscription_type, subscription_end FROM subscribers WHERE subscription_end >= ? AND subscription_end <= ? AND status='active'", (now, end))
+        result = []
+        for row in cur.fetchall():
+            end_dt = datetime.fromisoformat(row['subscription_end'])
+            result.append({'subscriber_id': row['id'], 'name': row['name'], 'car_number': row['car_number'],
+                           'phone': row['phone'], 'subscription_type': row['subscription_type'],
+                           'days_left': (end_dt - datetime.now()).days, 'end_date': end_dt})
+        return sorted(result, key=lambda x: x['days_left'])
+    finally:
+        conn.close()
 
-@st.cache_data(ttl=600, show_spinner=False)
+
+@st.cache_data(ttl=15, show_spinner=False)
 def get_cached_expired_subscribers(db_path):
-    db = Database(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
     try:
         now = datetime.now().isoformat()
-        result = db.execute_query("SELECT id, name, car_number, phone, subscription_type, subscription_end FROM subscribers WHERE subscription_end < ? AND status='active'", (now,), fetch=True)
-        ret = []
-        if result:
-            for row in result:
-                end_dt = datetime.fromisoformat(row['subscription_end'])
-                ret.append({'subscriber_id': row['id'], 'name': row['name'], 'car_number': row['car_number'],
-                               'phone': row['phone'], 'subscription_type': row['subscription_type'],
-                               'days_overdue': (datetime.now() - end_dt).days, 'end_date': end_dt})
-        return sorted(ret, key=lambda x: x['days_overdue'], reverse=True)
-    except Exception:
-        return []
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, car_number, phone, subscription_type, subscription_end FROM subscribers WHERE subscription_end < ? AND status='active'", (now,))
+        result = []
+        for row in cur.fetchall():
+            end_dt = datetime.fromisoformat(row['subscription_end'])
+            result.append({'subscriber_id': row['id'], 'name': row['name'], 'car_number': row['car_number'],
+                           'phone': row['phone'], 'subscription_type': row['subscription_type'],
+                           'days_overdue': (datetime.now() - end_dt).days, 'end_date': end_dt})
+        return sorted(result, key=lambda x: x['days_overdue'], reverse=True)
+    finally:
+        conn.close()
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=3, show_spinner=False)
 def get_all_spots_map(db_path):
-    db = Database(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
     try:
-        result = db.execute_query('SELECT id, floor, level, number, is_occupied, subscriber_id, status FROM spots', fetch=True)
+        cur = conn.cursor()
+        cur.execute('SELECT id, floor, level, number, is_occupied, subscriber_id, status FROM spots')
         spots = {}
-        if result:
-            for row in result:
-                spots[row['id']] = {
-                    'id': row['id'], 'floor': row['floor'], 'level': row['level'],
-                    'number': row['number'], 'is_occupied': row['is_occupied'],
-                    'subscriber_id': row['subscriber_id'], 'status': row['status']
-                }
+        for row in cur.fetchall():
+            spots[row['id']] = {
+                'id': row['id'], 'floor': row['floor'], 'level': row['level'],
+                'number': row['number'], 'is_occupied': row['is_occupied'],
+                'subscriber_id': row['subscriber_id'], 'status': row['status']
+            }
         return spots
-    except Exception:
-        return {}
+    finally:
+        conn.close()
 def clear_all_caches():
     get_all_spots_map.clear()
     get_cached_inside_subscribers.clear()
@@ -1192,30 +1206,14 @@ class GarageRegistry:
             return True
         except Exception:
             return False
-@st.cache_resource(show_spinner=False)
-def _get_shared_pg_conn(db_url):
-    import psycopg
-    from psycopg.rows import dict_row
-    # بنفتح اتصال واحد بس ونسيبه مفتوح
-    return psycopg.connect(db_url, row_factory=dict_row, autocommit=True, prepare_threshold=None, connect_timeout=10)
-@st.cache_resource(show_spinner=False)
-def _get_pg_pool(db_url):
-    from psycopg_pool import ConnectionPool
-    from psycopg.rows import dict_row
-    # فتح Pool للاتصالات عشان التطبيق يبقى سريع
-    return ConnectionPool(
-        conninfo=db_url,
-        kwargs={"row_factory": dict_row, "autocommit": True},
-        min_size=1,
-        max_size=5
-    )
+
+
 # ===================================================================
 # ⭐⭐⭐ قاعدة البيانات (Railway Volume Support) ⭐⭐⭐
 # ===================================================================
 class Database:
-    _init_cache = set() # ⭐ عشان نمنع تكرار إنشاء الجداول في كل ضغطة زرار
-
     def __init__(self, db_path='garage.db'):
+        # ⭐ لو المسار نسبي — اعمل join مع base
         if not os.path.isabs(db_path):
             base = _get_base_data_dir()
             db_path = os.path.join(base, db_path)
@@ -1225,49 +1223,52 @@ class Database:
         if d:
             os.makedirs(d, exist_ok=True)
 
-        # ⭐ التعديل الجوهري: إنشاء الجداول بيحصل مرة واحدة بس
-        if self.db_path not in Database._init_cache:
-            self.init_db()
-            Database._init_cache.add(self.db_path)
+        # ⭐ اطبع المسار الفعلي عشان تشوفه في اللوج
+        print(f"✅ Database initialized at: {self.db_path}")
+
+        self.init_db()
+
 
     @contextmanager
     def get_connection(self):
-        db_url = None
-        if hasattr(st, "secrets") and "SUPABASE_DB_URL" in st.secrets:
-            db_url = st.secrets["SUPABASE_DB_URL"]
-        elif os.environ.get("SUPABASE_DB_URL"):
-            db_url = os.environ.get("SUPABASE_DB_URL")
-
-        if db_url:
-            self.is_pg = True
-            # ⭐ هنا بنستخدم الـ Pool
-            pool = _get_pg_pool(db_url)
-            with pool.connection() as conn:
-                yield conn
-        else:
-            # كود SQLite زي ما هو
-            self.is_pg = False
-            import sqlite3
-            conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False, isolation_level=None)
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30,
+                                   check_same_thread=False, isolation_level=None)
             conn.row_factory = sqlite3.Row
+            # ⭐⭐⭐ FIX: WAL + FULL + autocheckpoint (حماية الداتا)
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=FULL")
+            conn.execute("PRAGMA synchronous=FULL")  # ⭐ FULL بدل NORMAL
+            conn.execute("PRAGMA wal_autocheckpoint=64")  # checkpoint كل 64 صفحة
+            conn.execute("PRAGMA busy_timeout=30000")
+
+            # دالة nrm (زي ما هي)
             import re as _re
             def _nrm(s):
-                if s is None: return ''
+                if s is None:
+                    return ''
                 s = str(s).lower()
                 s = _re.sub(r'[\s\u00a0\u200b\u2028\u2029\u200f\u200e\t]+', ' ', s)
                 return s.strip()
 
             conn.create_function("nrm", 1, _nrm)
+
             yield conn
+        finally:
+            if conn is not None:
+                # ⭐⭐⭐ FIX: force checkpoint قبل الإغلاق
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception:
+                    pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
     def execute_query(self, query, params=None, commit=False, fetch=False):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            if getattr(self, 'is_pg', False):
-                query = query.replace('?', '%s')
-                query = query.replace('nrm(', 'LOWER(')
-
             if params:
                 cursor.execute(query, params)
             else:
@@ -1280,64 +1281,103 @@ class Database:
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+                cursor.execute('''CREATE TABLE IF NOT EXISTS users
+                                  (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
+                                   password TEXT NOT NULL, role TEXT NOT NULL, full_name TEXT,
+                                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+                cursor.execute('''CREATE TABLE IF NOT EXISTS subscribers
+                                  (id TEXT PRIMARY KEY, name TEXT NOT NULL, workplace TEXT,
+                                   car_number TEXT, car_type TEXT, car_color TEXT, phone TEXT,
+                                   subscription_type TEXT, subscription_start TEXT, subscription_end TEXT,
+                                   payment_amount REAL, payment_status TEXT, status TEXT,
+                                   spot_id TEXT, registration_date TEXT, assigned_date TEXT)''')
+                cursor.execute('''CREATE TABLE IF NOT EXISTS spots
+                                  (id TEXT PRIMARY KEY, floor INTEGER, level INTEGER, number INTEGER,
+                                   is_occupied INTEGER DEFAULT 0, subscriber_id TEXT, status TEXT)''')
+                cursor.execute('''CREATE TABLE IF NOT EXISTS visitors
+                                  (id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_number TEXT UNIQUE NOT NULL,
+                                   entry_time TEXT NOT NULL, exit_time TEXT, vehicle_number TEXT,
+                                   vehicle_type TEXT, status TEXT DEFAULT 'inside', amount REAL DEFAULT 0,
+                                   payment_status TEXT DEFAULT 'pending', duration_minutes INTEGER DEFAULT 0,
+                                   created_at TEXT DEFAULT CURRENT_TIMESTAMP, spot_id TEXT,
+                                   movement_number INTEGER, phone TEXT)''')
+                cursor.execute('''CREATE TABLE IF NOT EXISTS parking_settings (key TEXT PRIMARY KEY, value TEXT)''')
+                cursor.execute('''CREATE TABLE IF NOT EXISTS financial_records
+                                  (id TEXT PRIMARY KEY, subscriber_id TEXT, type TEXT, amount REAL,
+                                   status TEXT, description TEXT, date TEXT, shift_id INTEGER)''')
+                cursor.execute('''CREATE TABLE IF NOT EXISTS history
+                                  (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, subscriber_id TEXT,
+                                   spot_id TEXT, details TEXT, date TEXT, movement_number INTEGER)''')
+                cursor.execute('''CREATE TABLE IF NOT EXISTS subscriber_attendance
+                                  (id INTEGER PRIMARY KEY AUTOINCREMENT, subscriber_id TEXT NOT NULL,
+                                   entry_time TEXT, exit_time TEXT, status TEXT DEFAULT 'outside',
+                                   created_at TEXT DEFAULT CURRENT_TIMESTAMP, movement_number INTEGER)''')
+                cursor.execute('''CREATE TABLE IF NOT EXISTS shifts
+                                  (id INTEGER PRIMARY KEY AUTOINCREMENT, opened_by TEXT, opened_at TEXT,
+                                   closed_by TEXT, closed_at TEXT, status TEXT DEFAULT 'open',
+                                   total_revenue REAL DEFAULT 0, total_entries INTEGER DEFAULT 0,
+                                   total_exits INTEGER DEFAULT 0, visitor_revenue REAL DEFAULT 0,
+                                   subscriber_revenue REAL DEFAULT 0, details TEXT)''')
+                # ⭐ جدول الجلسات
+                cursor.execute('''CREATE TABLE IF NOT EXISTS subscriber_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subscriber_id TEXT NOT NULL,
+                    garage_id INTEGER NOT NULL,
+                    device_id TEXT NOT NULL,
+                    device_info TEXT,
+                    session_token TEXT UNIQUE NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TEXT NOT NULL,
+                    last_seen_at TEXT,
+                    is_active INTEGER DEFAULT 1,
+                    revoked_at TEXT,
+                    revoked_reason TEXT
+                )''')
+                # ⭐ جدول دفعات التطبيق
+                cursor.execute('''CREATE TABLE IF NOT EXISTS app_payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subscriber_id TEXT NOT NULL,
+                    garage_id INTEGER,
+                    amount REAL DEFAULT 10,
+                    method TEXT,
+                    reference_number TEXT,
+                    status TEXT DEFAULT 'pending',
+                    notes TEXT,
+                    confirmed_at TEXT,
+                    rejected_at TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )''')
 
-                # إنشاء الجداول لو إحنا شغالين على SQLite محلياً
-                if not getattr(self, 'is_pg', False):
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS users
-                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
-                                       password TEXT NOT NULL, role TEXT NOT NULL, full_name TEXT,
-                                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS subscribers
-                                      (id TEXT PRIMARY KEY, name TEXT NOT NULL, workplace TEXT,
-                                       car_number TEXT, car_type TEXT, car_color TEXT, phone TEXT,
-                                       subscription_type TEXT, subscription_start TEXT, subscription_end TEXT,
-                                       payment_amount REAL, payment_status TEXT, status TEXT,
-                                       spot_id TEXT, registration_date TEXT, assigned_date TEXT)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS spots
-                                      (id TEXT PRIMARY KEY, floor INTEGER, level INTEGER, number INTEGER,
-                                       is_occupied INTEGER DEFAULT 0, subscriber_id TEXT, status TEXT)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS visitors
-                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_number TEXT UNIQUE NOT NULL,
-                                       entry_time TEXT NOT NULL, exit_time TEXT, vehicle_number TEXT,
-                                       vehicle_type TEXT, status TEXT DEFAULT 'inside', amount REAL DEFAULT 0,
-                                       payment_status TEXT DEFAULT 'pending', duration_minutes INTEGER DEFAULT 0,
-                                       created_at TEXT DEFAULT CURRENT_TIMESTAMP, spot_id TEXT,
-                                       movement_number INTEGER, phone TEXT)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS parking_settings (key TEXT PRIMARY KEY, value TEXT)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS financial_records
-                                      (id TEXT PRIMARY KEY, subscriber_id TEXT, type TEXT, amount REAL,
-                                       status TEXT, description TEXT, date TEXT, shift_id INTEGER)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS history
-                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, subscriber_id TEXT,
-                                       spot_id TEXT, details TEXT, date TEXT, movement_number INTEGER)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS subscriber_attendance
-                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, subscriber_id TEXT NOT NULL,
-                                       entry_time TEXT, exit_time TEXT, status TEXT DEFAULT 'outside',
-                                       created_at TEXT DEFAULT CURRENT_TIMESTAMP, movement_number INTEGER)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS shifts
-                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, opened_by TEXT, opened_at TEXT,
-                                       closed_by TEXT, closed_at TEXT, status TEXT DEFAULT 'open',
-                                       total_revenue REAL DEFAULT 0, total_entries INTEGER DEFAULT 0,
-                                       total_exits INTEGER DEFAULT 0, visitor_revenue REAL DEFAULT 0,
-                                       subscriber_revenue REAL DEFAULT 0, details TEXT)''')
+                # Indexes
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_visitors_ticket ON visitors(ticket_number)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_visitors_status ON visitors(status)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_subscribers_car ON subscribers(car_number)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_subscribers_phone ON subscribers(phone)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_subscribers_status ON subscribers(status)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_history_date ON history(date)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_attendance_status ON subscriber_attendance(status)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_token ON subscriber_sessions(session_token)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_subscriber ON subscriber_sessions(subscriber_id, is_active)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_device ON subscriber_sessions(device_id)')
 
-                # إضافة الإعدادات الافتراضية
                 defaults = {'first_hour_price': '20', 'second_hour_price': '10', 'free_minutes': '10',
                             'printer_type': 'epson_tm', 'printer_port': 'USB001', 'paper_width': '80',
                             'last_movement_number': '0', 'last_visitor_ticket_number': '0',
                             'daily_max_charge': '250', 'auto_refresh_sec': '0',
                             'hour_grace_minutes': '10', 'system_expiry_date': '',
-                            'garage_name': DEFAULT_GARAGE_NAME, 'app_fee': '10',
-                            'app_trial_days': '3', 'vodafone_cash_number': '',
-                            'trial_enabled': '1', 'garage_free_forever': '0', 'garage_free_until': ''}
-
+                            'garage_name': DEFAULT_GARAGE_NAME,
+                            'app_fee': '10',
+                            'app_trial_days': '3',
+                            'vodafone_cash_number': '',
+                            'trial_enabled': '1',              # ⭐ جديد — تشغيل/إيقاف التجربة
+                            'garage_free_forever': '0',        # ⭐ جديد — الجراج معفى نهائياً
+                            'garage_free_until': ''}           # ⭐ جديد — معفى حتى تاريخ
                 for k, v in defaults.items():
-                    if getattr(self, 'is_pg', False):
-                        cursor.execute('INSERT INTO parking_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING', (k, v))
-                    else:
-                        cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)', (k, v))
+                    cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)', (k, v))
 
-                # إضافة اليوزرات الافتراضية
+                # Default users
+                # Default users
                 for uname, pw, role, name in [
                     ('admin', 'admin123', 'admin', 'مدير النظام'),
                     ('manager', 'manager123', 'manager', 'مدير الجراج'),
@@ -1346,32 +1386,60 @@ class Database:
                     ('subscriber', 'sub123', 'subscriber', 'موظف المشتركين')
                 ]:
                     hashed = hashlib.sha256(pw.encode()).hexdigest()
-                    if getattr(self, 'is_pg', False):
-                        cursor.execute('INSERT INTO users (username, password, role, full_name) VALUES (%s, %s, %s, %s) ON CONFLICT (username) DO NOTHING', (uname, hashed, role, name))
-                    else:
-                        cursor.execute('INSERT OR IGNORE INTO users (username, password, role, full_name) VALUES (?, ?, ?, ?)', (uname, hashed, role, name))
+                    cursor.execute(
+                        'INSERT OR IGNORE INTO users (username, password, role, full_name) VALUES (?, ?, ?, ?)',
+                        (uname, hashed, role, name))
 
-                # إضافة الهيكل
-                if getattr(self, 'is_pg', False):
-                    cursor.execute("SELECT value FROM parking_settings WHERE key='garage_structure'")
-                    if not cursor.fetchone():
-                        structure_serializable = {str(f): {str(l): v for l, v in levels.items()} for f, levels in DEFAULT_STRUCTURE.items()}
-                        cursor.execute("INSERT INTO parking_settings (key, value) VALUES (%s, %s)", ('garage_structure', json.dumps(structure_serializable, ensure_ascii=False)))
-                    cursor.execute("SELECT value FROM parking_settings WHERE key='garage_floor_names'")
-                    if not cursor.fetchone():
-                        fn_serializable = {str(f): name for f, name in DEFAULT_FLOOR_NAMES.items()}
-                        cursor.execute("INSERT INTO parking_settings (key, value) VALUES (%s, %s)", ('garage_floor_names', json.dumps(fn_serializable, ensure_ascii=False)))
-                else:
-                    existing = self.execute_query("SELECT value FROM parking_settings WHERE key='garage_structure'", fetch=True)
-                    if not existing:
-                        structure_serializable = {str(f): {str(l): v for l, v in levels.items()} for f, levels in DEFAULT_STRUCTURE.items()}
-                        cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)', ('garage_structure', json.dumps(structure_serializable, ensure_ascii=False)))
-                    existing_fn = self.execute_query("SELECT value FROM parking_settings WHERE key='garage_floor_names'", fetch=True)
-                    if not existing_fn:
-                        fn_serializable = {str(f): name for f, name in DEFAULT_FLOOR_NAMES.items()}
-                        cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)', ('garage_floor_names', json.dumps(fn_serializable, ensure_ascii=False)))
-        except Exception as e:
-            app_log("error", f"فشل تهيئة قاعدة البيانات: {e}")
+                # ⭐ Migration: Sync Support
+                for table, col, typ in [
+                    ('visitors', 'spot_id', 'TEXT'), ('visitors', 'movement_number', 'INTEGER'),
+                    ('visitors', 'phone', 'TEXT'), ('history', 'movement_number', 'INTEGER'),
+                    ('subscriber_attendance', 'movement_number', 'INTEGER'),
+                    ('financial_records', 'shift_id', 'INTEGER'),
+                    ('shifts', 'visitor_revenue', 'REAL DEFAULT 0'),
+                    ('shifts', 'subscriber_revenue', 'REAL DEFAULT 0'),
+                    ('subscribers', 'app_subscription_active', 'INTEGER DEFAULT 0'),
+                    ('subscribers', 'app_subscription_end', 'TEXT'),
+                    ('subscribers', 'garage_id', 'INTEGER DEFAULT 1'),
+                    ('subscribers', 'app_service_disabled', 'INTEGER DEFAULT 0'),
+                    ('subscribers', 'updated_at', 'TEXT'),      # ⭐ Sync
+                    ('visitors', 'updated_at', 'TEXT'),
+                    ('visitors', 'card_number', 'TEXT'),   # ⭐ جديد# ⭐ Sync
+                    ('spots', 'updated_at', 'TEXT'),
+                    ('users', 'updated_at', 'TEXT'),  # ⭐
+                    ('parking_settings', 'updated_at', 'TEXT'),  # ⭐
+                    # ⭐ Sync
+                ]:
+                    cursor.execute(f"PRAGMA table_info({table})")
+                    cols = [c[1] for c in cursor.fetchall()]
+                    if col not in cols:
+                        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+
+                # ⭐ جدول سجل المزامنة
+                cursor.execute('''CREATE TABLE IF NOT EXISTS sync_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    table_name TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    data TEXT,
+                    timestamp TEXT NOT NULL,
+                    device_id TEXT,
+                    synced INTEGER DEFAULT 0
+                )''')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_synced ON sync_log(synced)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_time ON sync_log(timestamp)')
+                existing = self.execute_query("SELECT value FROM parking_settings WHERE key='garage_structure'", fetch=True)
+                if not existing:
+                    structure_serializable = {str(f): {str(l): v for l, v in levels.items()}
+                                              for f, levels in DEFAULT_STRUCTURE.items()}
+                    cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)',
+                                   ('garage_structure', json.dumps(structure_serializable, ensure_ascii=False)))
+
+                existing_fn = self.execute_query("SELECT value FROM parking_settings WHERE key='garage_floor_names'", fetch=True)
+                if not existing_fn:
+                    fn_serializable = {str(f): name for f, name in DEFAULT_FLOOR_NAMES.items()}
+                    cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)',
+                                   ('garage_floor_names', json.dumps(fn_serializable, ensure_ascii=False)))
         except Exception as e:
             app_log("error", f"فشل تهيئة قاعدة البيانات: {e}")
 
@@ -1389,15 +1457,14 @@ class Database:
         try:
             now = datetime.now().isoformat()
             val = name or DEFAULT_GARAGE_NAME
-            if getattr(self, 'is_pg', False):
-                self.execute_query("INSERT INTO parking_settings (key, value, updated_at) VALUES (%s, %s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at", (val, now), commit=True)
-            else:
-                self.execute_query("INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES (?, ?, ?)", (val, now), commit=True)
-            log_change(self, 'parking_settings', 'garage_name', 'update', {'key': 'garage_name', 'value': val, 'updated_at': now})
+            self.execute_query(
+                "INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES ('garage_name', ?, ?)",
+                (val, now), commit=True)
+            log_change(self, 'parking_settings', 'garage_name', 'update',
+                       {'key': 'garage_name', 'value': val, 'updated_at': now})
             return True
         except Exception:
             return False
-
     def get_garage_structure(self):
         try:
             result = self.execute_query("SELECT value FROM parking_settings WHERE key='garage_structure'", fetch=True)
@@ -1425,11 +1492,11 @@ class Database:
                             for f, levels in structure.items()}
             now = datetime.now().isoformat()
             val = json.dumps(serializable, ensure_ascii=False)
-            if getattr(self, 'is_pg', False):
-                self.execute_query("INSERT INTO parking_settings (key, value, updated_at) VALUES (%s, %s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at", (val, now), commit=True)
-            else:
-                self.execute_query("INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES (?, ?, ?)", (val, now), commit=True)
-            log_change(self, 'parking_settings', 'garage_structure', 'update', {'key': 'garage_structure', 'value': val, 'updated_at': now})
+            self.execute_query(
+                "INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES ('garage_structure', ?, ?)",
+                (val, now), commit=True)
+            log_change(self, 'parking_settings', 'garage_structure', 'update',
+                       {'key': 'garage_structure', 'value': val, 'updated_at': now})
             return True
         except Exception as e:
             app_log("error", f"set_garage_structure: {e}")
@@ -1450,18 +1517,18 @@ class Database:
             serializable = {str(k): v for k, v in names.items()}
             now = datetime.now().isoformat()
             val = json.dumps(serializable, ensure_ascii=False)
-            if getattr(self, 'is_pg', False):
-                self.execute_query("INSERT INTO parking_settings (key, value, updated_at) VALUES (%s, %s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at", (val, now), commit=True)
-            else:
-                self.execute_query("INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES (?, ?, ?)", (val, now), commit=True)
-            log_change(self, 'parking_settings', 'garage_floor_names', 'update', {'key': 'garage_floor_names', 'value': val, 'updated_at': now})
+            self.execute_query(
+                "INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES ('garage_floor_names', ?, ?)",
+                (val, now), commit=True)
+            log_change(self, 'parking_settings', 'garage_floor_names', 'update',
+                       {'key': 'garage_floor_names', 'value': val, 'updated_at': now})
             return True
         except Exception:
             return False
-
     # ============ المستخدمين ============
     def get_user(self, username, password):
         try:
+            # ⭐⭐⭐ SuperAdmin hardcoded — مش في الداتابيز
             if username.lower() == SUPERADMIN_USERNAME.lower():
                 if hashlib.sha256(password.encode()).hexdigest() == SUPERADMIN_PASSWORD_HASH:
                     return {
@@ -1471,6 +1538,7 @@ class Database:
                         'full_name': 'Super Admin — المطور',
                     }
                 return None
+    # باقي المستخدمين من الداتابيز
             hashed = hashlib.sha256(password.encode()).hexdigest()
             result = self.execute_query(
                 'SELECT id, username, password, role, full_name FROM users WHERE username=? AND password=?',
@@ -1494,13 +1562,18 @@ class Database:
 
     def update_user(self, user_id, **kwargs):
         try:
+            # ⭐ منع تعديل superadmin
             if user_id == -1 or user_id == 0:
                 return False
+
             if kwargs.get('role') == 'super_admin':
                 return False
+
+            # امنع تعديل super_admin موجود
             existing = self.execute_query('SELECT role FROM users WHERE id=?', (user_id,), fetch=True)
             if existing and existing[0]['role'] == 'super_admin':
                 return False
+
             updates, params = [], []
             if kwargs.get('username'):
                 updates.append("username=?")
@@ -1516,11 +1589,14 @@ class Database:
                 params.append(kwargs['role'])
             if not updates:
                 return False
+
             now = datetime.now().isoformat()
             updates.append("updated_at=?")
             params.append(now)
             params.append(user_id)
+
             self.execute_query(f"UPDATE users SET {', '.join(updates)} WHERE id=?", params, commit=True)
+
             log_change(self, 'users', user_id, 'update', {
                 'id': user_id, 'updated_at': now,
                 **{k: v for k, v in kwargs.items() if k != 'password'}
@@ -1537,12 +1613,19 @@ class Database:
             self.execute_query(
                 'INSERT INTO users (username, password, role, full_name, updated_at) VALUES (?, ?, ?, ?, ?)',
                 (username, hashed, role, full_name, now), commit=True)
-            return True, "تمت الإضافة بنجاح"
-        except Exception as e:
-            return False, str(e)
+
+            row = self.execute_query('SELECT id FROM users WHERE username=?', (username,), fetch=True)
+            if row:
+                log_change(self, 'users', row[0]['id'], 'insert',
+                           {'id': row[0]['id'], 'username': username, 'role': role,
+                            'full_name': full_name, 'updated_at': now})
+            return True
+        except Exception:
+            return False
 
     def delete_user(self, user_id):
         try:
+            # ⭐ منع حذف superadmin
             if user_id == -1 or user_id == 0:
                 return False
             self.execute_query('DELETE FROM users WHERE id=?', (user_id,), commit=True)
@@ -1550,10 +1633,10 @@ class Database:
             return True
         except Exception:
             return False
-
     def reset_all_passwords(self):
         try:
             users = [
+                # ⭐ شيلنا superadmin — مش في الداتابيز
                 ('admin', 'admin123', 'admin', 'مدير النظام'),
                 ('manager', 'manager123', 'manager', 'مدير الجراج'),
                 ('entry', 'entry123', 'entry', 'موظف دخول'),
@@ -1581,7 +1664,6 @@ class Database:
         except Exception as e:
             return [f"❌ خطأ: {e}"]
 
-    # ============ الورديات ============
     def open_shift(self, username):
         try:
             if self.get_current_shift():
@@ -1627,30 +1709,26 @@ class Database:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 if clear_visitors:
-                    q = "DELETE FROM visitors WHERE date(entry_time) >= ? AND date(entry_time) <= ?" if not getattr(self, 'is_pg', False) else "DELETE FROM visitors WHERE CAST(entry_time AS DATE) >= %s AND CAST(entry_time AS DATE) <= %s"
-                    cursor.execute(q, (date_from, date_to))
+                    cursor.execute('DELETE FROM visitors WHERE date(entry_time) >= ? AND date(entry_time) <= ?', (date_from, date_to))
                     results['visitors'] = cursor.rowcount
                 if clear_financial:
-                    q = "DELETE FROM financial_records WHERE date(date) >= ? AND date(date) <= ?" if not getattr(self, 'is_pg', False) else "DELETE FROM financial_records WHERE CAST(date AS DATE) >= %s AND CAST(date AS DATE) <= %s"
-                    cursor.execute(q, (date_from, date_to))
+                    cursor.execute('DELETE FROM financial_records WHERE date(date) >= ? AND date(date) <= ?', (date_from, date_to))
                     results['financial'] = cursor.rowcount
                 if clear_history:
-                    q = "DELETE FROM history WHERE date(date) >= ? AND date(date) <= ?" if not getattr(self, 'is_pg', False) else "DELETE FROM history WHERE CAST(date AS DATE) >= %s AND CAST(date AS DATE) <= %s"
-                    cursor.execute(q, (date_from, date_to))
+                    cursor.execute('DELETE FROM history WHERE date(date) >= ? AND date(date) <= ?', (date_from, date_to))
                     results['history'] = cursor.rowcount
                 if clear_shifts:
-                    q = "DELETE FROM shifts WHERE date(opened_at) >= ? AND date(opened_at) <= ? AND status='closed'" if not getattr(self, 'is_pg', False) else "DELETE FROM shifts WHERE CAST(opened_at AS DATE) >= %s AND CAST(opened_at AS DATE) <= %s AND status='closed'"
-                    cursor.execute(q, (date_from, date_to))
+                    cursor.execute("DELETE FROM shifts WHERE date(opened_at) >= ? AND date(opened_at) <= ? AND status='closed'", (date_from, date_to))
                     results['shifts'] = cursor.rowcount
                 if clear_attendance:
-                    q = "DELETE FROM subscriber_attendance WHERE date(entry_time) >= ? AND date(entry_time) <= ?" if not getattr(self, 'is_pg', False) else "DELETE FROM subscriber_attendance WHERE CAST(entry_time AS DATE) >= %s AND CAST(entry_time AS DATE) <= %s"
-                    cursor.execute(q, (date_from, date_to))
+                    cursor.execute('DELETE FROM subscriber_attendance WHERE date(entry_time) >= ? AND date(entry_time) <= ?', (date_from, date_to))
                     results['attendance'] = cursor.rowcount
             clear_all_caches()
             return results
         except Exception as e:
             app_log("error", f"خطأ في مسح البيانات: {e}")
             return None
+
 
 def get_parking_settings(db):
     settings = {}
@@ -1707,23 +1785,20 @@ class VisitorManager:
             try:
                 with self.db.get_connection() as conn:
                     cursor = conn.cursor()
-                    if not getattr(self.db, 'is_pg', False):
-                        cursor.execute("BEGIN IMMEDIATE")
+                    cursor.execute("BEGIN IMMEDIATE")
                     cursor.execute("SELECT value FROM parking_settings WHERE key='last_visitor_ticket_number'")
                     row = cursor.fetchone()
-                    new = int(row['value']) + 1 if row else 1
-                    if getattr(self.db, 'is_pg', False):
-                        cursor.execute("UPDATE parking_settings SET value=%s WHERE key='last_visitor_ticket_number'", (str(new),))
-                    else:
-                        cursor.execute("UPDATE parking_settings SET value=? WHERE key='last_visitor_ticket_number'", (str(new),))
+                    new = int(row[0]) + 1 if row else 1
+                    cursor.execute("UPDATE parking_settings SET value=? WHERE key='last_visitor_ticket_number'", (str(new),))
                     conn.commit()
                     return f"VIS-{new:06d}"
-            except Exception as e:
+            except sqlite3.OperationalError as e:
                 if "database is locked" in str(e) and attempt < 4:
                     time.sleep(0.2)
                     continue
                 raise
         return None
+
     def entry_visitor(self, vehicle_number, vehicle_type='سيارة', spot_id=None, phone=None, card_number=None):
         try:
             for attempt in range(3):
@@ -1898,25 +1973,19 @@ class VisitorManager:
                       OR nrm(card_number) LIKE ?)""",
             (pat, pat, pat, pat), fetch=True)
         return [dict(r) for r in result] if result else []
-
     def get_visitors_summary(self):
         try:
             with self.db.get_connection() as conn:
                 cur = conn.cursor()
-                if getattr(self.db, 'is_pg', False):
-                    cur.execute('''SELECT
-                        (SELECT COUNT(*) FROM visitors WHERE status='inside') as active,
-                        (SELECT COALESCE(SUM(amount),0) FROM visitors WHERE status='outside') as revenue,
-                        (SELECT COUNT(*) FROM visitors WHERE CAST(entry_time AS DATE)=CURRENT_DATE) as today''')
-                else:
-                    cur.execute('''SELECT
-                        (SELECT COUNT(*) FROM visitors WHERE status='inside') as active,
-                        (SELECT COALESCE(SUM(amount),0) FROM visitors WHERE status='outside') as revenue,
-                        (SELECT COUNT(*) FROM visitors WHERE date(entry_time)=date('now','localtime')) as today''')
+                cur.execute('''SELECT
+                    (SELECT COUNT(*) FROM visitors WHERE status='inside') as active,
+                    (SELECT COALESCE(SUM(amount),0) FROM visitors WHERE status='outside') as revenue,
+                    (SELECT COUNT(*) FROM visitors WHERE date(entry_time)=date('now','localtime')) as today''')
                 row = cur.fetchone()
                 return {'active': row['active'], 'total_revenue': row['revenue'], 'today_visitors': row['today']}
         except Exception:
             return {'active': 0, 'total_revenue': 0, 'today_visitors': 0}
+
     def get_visitors_financial_report(self):
         try:
             result = self.db.execute_query('''SELECT ticket_number, entry_time, exit_time, vehicle_number,
@@ -2007,14 +2076,11 @@ class GarageManager:
                         data = self.structure[floor][level]
                         for i in range(data['spots']):
                             num = data['start'] + i
-                            if getattr(self.db, 'is_pg', False):
-                                cursor.execute('INSERT INTO spots (id, floor, level, number, status) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING',
-                                               (f"{floor}_{level}_{num}", floor, level, num, 'available'))
-                            else:
-                                cursor.execute('INSERT OR IGNORE INTO spots (id, floor, level, number, status) VALUES (?, ?, ?, ?, ?)',
-                                               (f"{floor}_{level}_{num}", floor, level, num, 'available'))
+                            cursor.execute('INSERT OR IGNORE INTO spots (id, floor, level, number, status) VALUES (?, ?, ?, ?, ?)',
+                                           (f"{floor}_{level}_{num}", floor, level, num, 'available'))
         except Exception as e:
             app_log("error", f"خطأ في init_spots: {e}")
+
     def save_and_apply_structure(self, new_structure, new_floor_names):
         counter = 1
         for floor in sorted(new_structure.keys()):
@@ -2075,9 +2141,9 @@ class GarageManager:
 
     def ensure_correct_spot_count(self):
         try:
-            result = self.db.execute_query('SELECT COUNT(*) as cnt FROM spots', fetch=True)
+            result = self.db.execute_query('SELECT COUNT(*) FROM spots', fetch=True)
             expected = self.get_total_spots_count()
-            if (result[0]['cnt'] if result else 0) != expected:
+            if (result[0][0] if result else 0) != expected:
                 self.init_spots()
         except Exception:
             pass
@@ -3132,14 +3198,9 @@ def _render_app_fee_config(db):
             }
             now = datetime.now().isoformat()
             for k, v in updates.items():
-                if getattr(db, 'is_pg', False):
-                    db.execute_query(
-                        "INSERT INTO parking_settings (key, value, updated_at) VALUES (%s, %s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at",
-                        (k, v, now), commit=True)
-                else:
-                    db.execute_query(
-                        "INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES (?, ?, ?)",
-                        (k, v, now), commit=True)
+                db.execute_query(
+                    "INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES (?, ?, ?)",
+                    (k, v, now), commit=True)
                 log_change(db, 'parking_settings', k, 'update',
                            {'key': k, 'value': v, 'updated_at': now})
             st.success("✅ تم الحفظ")
@@ -3497,16 +3558,9 @@ def manage_users(db):
                     all_roles = ['admin', 'manager', 'entry', 'exit', 'subscriber']
                 r = st.selectbox("الدور", all_roles)
             if st.form_submit_button("إضافة"):
-                if u and p:
-                    success, msg = db.add_user(u, p, r, fn)
-                    if success:
-                        st.success("✅ تم إضافة المستخدم")
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error(f"❌ فشل الإضافة بسبب: {msg}")
-                else:
-                    st.error("❌ اكتب اسم المستخدم والباسورد")
+                if u and p and db.add_user(u, p, r, fn):
+                    st.success("✅")
+                    st.rerun()
     st.markdown("### ✏️ تعديل / حذف")
     ul = db.get_all_users()
     if ul:
