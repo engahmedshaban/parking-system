@@ -1232,30 +1232,48 @@ class Database:
     def get_connection(self):
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30,
-                                   check_same_thread=False, isolation_level=None)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
+            # ⭐ 1) محاولة الاتصال بـ Supabase (إذا كان الرابط موجود)
+            db_url = None
+            if hasattr(st, "secrets") and "SUPABASE_DB_URL" in st.secrets:
+                db_url = st.secrets["SUPABASE_DB_URL"]
+            elif os.environ.get("SUPABASE_DB_URL"):
+                db_url = os.environ.get("SUPABASE_DB_URL")
 
-            # ⭐ تسجيل دالة تنظيف المسافات
-            import re as _re
-            def _nrm(s):
-                if s is None:
-                    return ''
-                s = str(s).lower()
-                s = _re.sub(r'[\s\u00a0\u200b\u2028\u2029\u200f\u200e\t]+', ' ', s)
-                return s.strip()
-            conn.create_function("nrm", 1, _nrm)
+            if db_url:
+                import sqlalchemy
+                from sqlalchemy.pool import NullPool
+                import psycopg2.extras
 
-            yield conn
+                engine = sqlalchemy.create_engine(db_url, client_encoding='utf8', poolclass=NullPool)
+                conn = engine.connect()
+                conn.connection.cursor_factory = psycopg2.extras.RealDictCursor
+                yield conn
+                conn.commit()
+            else:
+                # ⭐ 2) الاتصال بـ SQLite (للتجربة المحلية)
+                import sqlite3
+                conn = sqlite3.connect(self.db_path, timeout=30,
+                                       check_same_thread=False, isolation_level=None)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=FULL")
+
+                # دالة nrm للبحث (خاصة بـ SQLite)
+                import re as _re
+                def _nrm(s):
+                    if s is None: return ''
+                    s = str(s).lower()
+                    s = _re.sub(r'[\s\u00a0\u200b\u2028\u2029\u200f\u200e\t]+', ' ', s)
+                    return s.strip()
+
+                conn.create_function("nrm", 1, _nrm)
+                yield conn
         finally:
             if conn is not None:
                 try:
                     conn.close()
                 except Exception:
                     pass
-
     def execute_query(self, query, params=None, commit=False, fetch=False):
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -1987,7 +2005,42 @@ class VisitorManager:
         except Exception:
             return []
 
+    # ⭐⭐ جديد — منع استخدام الكارت مرتين
+    def get_visitor_by_card(self, card_number):
+        """يرجع الزائر النشط اللي معاه الكارت ده"""
+        if not card_number:
+            return None
+        result = self.db.execute_query(
+            "SELECT * FROM visitors WHERE card_number=? AND status='inside' LIMIT 1",
+            (str(card_number).strip(),), fetch=True
+        )
+        return dict(result[0]) if result else None
 
+    def is_card_in_use(self, card_number):
+        """True لو الكارت مستخدم حالياً (زائر نشط أو مشترك نشط)"""
+        if not card_number:
+            return False, None, None
+
+        cn = str(card_number).strip()
+
+        # 1) زائر نشط بنفس الكارت؟
+        v = self.get_visitor_by_card(cn)
+        if v:
+            return True, 'visitor', v
+
+        # 2) مشترك نشط بنفس رقم الكارت
+        sub = self.db.execute_query(
+            """SELECT s.id, s.name, s.car_number 
+               FROM subscribers s
+               JOIN subscriber_attendance sa ON sa.subscriber_id = s.id
+               WHERE s.car_number = ? AND sa.status = 'inside'
+               LIMIT 1""",
+            (cn,), fetch=True
+        )
+        if sub:
+            return True, 'subscriber', dict(sub[0])
+
+        return False, None, None
 # ===================================================================
 # ⭐⭐⭐ GarageManager ⭐⭐⭐
 # ===================================================================
@@ -2724,8 +2777,75 @@ class SubscriberAttendanceManager:
 # ===================================================================
 # ⭐⭐⭐ نافذة إغلاق الوردية ⭐⭐⭐
 # ===================================================================
+def _do_exit_user_close_and_print(db, manager):
+    """يوزر الخروج — يقفل ويطبع مباشرة بدون عرض بيانات قبل التقفيل"""
+    username = st.session_state.get('username', '')
+    shift_data = st.session_state.get('shift_close_data', {})
+    opened_at = shift_data.get('opened_at')
+
+    if not opened_at:
+        cur_shift = db.get_current_shift()
+        opened_at = cur_shift['opened_at'] if cur_shift else datetime.now().isoformat()
+
+    now = datetime.now().isoformat()
+    tr, te, tex, vr, sr = manager.get_shift_financial_data(opened_at, now)
+
+    if db.close_shift(username, tr, te, tex, vr, sr, f"إغلاق بواسطة {username}"):
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM shifts ORDER BY id DESC LIMIT 1')
+            last_shift = cursor.fetchone()
+
+        if last_shift:
+            fields = [
+                {'label': 'الوردية', 'value': str(last_shift['id'])},
+                {'label': 'افتتحت بواسطة', 'value': last_shift['opened_by'] or ''},
+                {'label': 'وقت الفتح', 'value': last_shift['opened_at'][:16] if last_shift['opened_at'] else ''},
+                {'label': 'أغلقت بواسطة', 'value': last_shift['closed_by'] or ''},
+                {'label': 'وقت الإغلاق', 'value': last_shift['closed_at'][:16] if last_shift['closed_at'] else ''},
+                {'label': 'إيرادات الزوار', 'value': f"{last_shift['visitor_revenue']:.2f}"},
+                {'label': 'إيرادات المشتركين', 'value': f"{last_shift['subscriber_revenue']:.2f}"},
+                {'label': 'الإيرادات الكلية', 'value': f"{last_shift['total_revenue']:.2f}"},
+                {'label': 'دخول', 'value': str(last_shift['total_entries'])},
+                {'label': 'خروج', 'value': str(last_shift['total_exits'])},
+            ]
+            st.session_state['receipt_data'] = {
+                'title': "📊 إغلاق الوردية",
+                'fields': fields,
+                'barcode_data': None, 'qr_data': None,
+                'footer_text': datetime.now().strftime('%Y-%m-%d %H:%M')
+            }
+
+        st.session_state['confirm_close_shift'] = False
+        st.session_state.pop('shift_close_data', None)
+        st.rerun()
+    else:
+        st.error("❌ فشل إغلاق الوردية")
+
+
 def _render_close_shift_confirmation(db, manager):
+    ur = st.session_state.get('user_role', 'user')
+    is_exit_user = (ur == 'exit')
+
     st.markdown("## ⚠️ تأكيد إغلاق الوردية")
+
+    # ⭐⭐ يوزر الخروج — تأكيد بسيط بدون بيانات
+    if is_exit_user:
+        st.warning("هل ترغب في إغلاق الوردية وطباعة التقرير؟")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("✅ نعم، أغلق واطبع", use_container_width=True,
+                         type="primary", key="confirm_exit_close_yes"):
+                _do_exit_user_close_and_print(db, manager)
+        with col2:
+            if st.button("❌ إلغاء", use_container_width=True, key="cancel_exit_close"):
+                st.session_state['confirm_close_shift'] = False
+                st.session_state.pop('shift_close_data', None)
+                st.rerun()
+        return
+
+    # ⭐⭐ للمدير/الأدمن/السوبر — الوضع الحالي (يظهر البيانات)
     shift_data = st.session_state.get('shift_close_data', {})
     tr = shift_data.get('total_revenue', 0)
     te = shift_data.get('total_entries', 0)
@@ -2734,7 +2854,6 @@ def _render_close_shift_confirmation(db, manager):
     sr = shift_data.get('subscriber_revenue', 0)
 
     st.warning("هل أنت متأكد من إغلاق الوردية؟")
-
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown(f"""<div class="metric-card" style="border-right-color: #4CAF50;"><div class="metric-value" style="color: #4CAF50; font-size: 24px;">{tr:,.0f}</div><div class="metric-label">💰 الإيرادات</div></div>""", unsafe_allow_html=True)
@@ -3679,6 +3798,157 @@ def render_unified_search(manager, visitor_manager, key_prefix="unified"):
 
 
 # ===================================================================
+def _get_dialog_decorator():
+    """يرجع st.dialog أو st.experimental_dialog أو None"""
+    for name in ('dialog', 'experimental_dialog'):
+        fn = getattr(st, name, None)
+        if fn is not None:
+            return fn
+    return None
+
+
+def _scroll_to_top():
+    """يرجع المستخدم لأعلى الصفحة — مهم للـ POS"""
+    try:
+        st.markdown(
+            """
+            <script>
+            try {
+                const doc = window.parent.document;
+                const containers = [
+                    doc.querySelector('[data-testid="stAppViewContainer"]'),
+                    doc.querySelector('[data-testid="stMain"]'),
+                    doc.querySelector('section.main'),
+                    doc.scrollingElement
+                ];
+                for (const el of containers) {
+                    if (el) { el.scrollTo({top: 0, behavior: 'instant'}); break; }
+                }
+                window.parent.scrollTo({top: 0, behavior: 'instant'});
+            } catch(e) {}
+            </script>
+            """,
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        pass
+def _render_spot_details_body(manager, visitor_manager, spot_id, info, inside_subs):
+    """جسم نافذة تفاصيل المكان"""
+    st.markdown(f"#### 📍 {get_spot_location(spot_id)}")
+
+    status_map = {'available': '🟢 متاح', 'occupied': '🔴 مشغول',
+                  'subscriber_out': '🟡 محفوظ لمشترك (خارج حالياً)'}
+    st.write(f"**الحالة:** {status_map.get(info['status'], info['status'])}")
+
+    if info['status'] in ('occupied', 'subscriber_out'):
+        sub_id = info.get('subscriber_id')
+        if sub_id:
+            sub = manager.get_subscriber(sub_id)
+            if sub:
+                is_inside = sub_id in inside_subs
+
+                st.markdown(f"### 👤 {sub['name']}")
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.write(f"**🎫 رقم الكارت:** {sub.get('car_number', '')}")
+                    st.write(f"**🚗 رقم العربية:** {sub.get('car_color', '') or '-'}")
+                    st.write(f"**🚙 النوع:** {sub.get('car_type', '') or '-'}")
+                with c2:
+                    st.write(f"**📱 الهاتف:** {sub.get('phone', '') or '-'}")
+                    st.write(f"**📅 النهاية:** {sub['subscription_end'][:10] if sub.get('subscription_end') else '-'}")
+                    st.write(f"**الحضور:** {'🟢 داخل الجراج' if is_inside else '🔴 خارج الجراج'}")
+
+                st.markdown("---")
+                cc1, cc2, cc3 = st.columns(3)
+                with cc1:
+                    if st.button("🔄 تجديد", key=f"dlg_renew_{sub_id}", use_container_width=True):
+                        st.session_state['renew_subscriber_id'] = sub_id
+                        st.session_state['_goto_page'] = "👤 إدارة المشتركين"
+                        st.session_state.pop('selected_garage_spot', None)
+                        st.rerun()
+                with cc2:
+                    if st.button("🎫 كارت", key=f"dlg_card_{sub_id}", use_container_width=True):
+                        st.session_state['show_subscriber_card'] = sub_id
+                        st.session_state['_goto_page'] = "👤 إدارة المشتركين"
+                        st.session_state.pop('selected_garage_spot', None)
+                        st.rerun()
+                with cc3:
+                    if st.button("✖ إغلاق", key=f"dlg_close_{spot_id}", use_container_width=True):
+                        st.session_state.pop('selected_garage_spot', None)
+                        st.rerun()
+
+                c4, c5 = st.columns(2)
+                with c4:
+                    if is_inside:
+                        if st.button("📤 تسجيل خروج المشترك", key=f"dlg_exit_sub_{sub_id}",
+                                     use_container_width=True):
+                            if st.session_state.attendance_manager.record_exit(sub_id):
+                                st.session_state.pop('selected_garage_spot', None)
+                                st.success("✅ تم - المكان أصبح متاحاً للزوار")
+                                time.sleep(0.4)
+                                st.rerun()
+                with c5:
+                    if not is_inside:
+                        if st.button("📥 تسجيل دخول المشترك", key=f"dlg_enter_sub_{sub_id}",
+                                     use_container_width=True):
+                            if st.session_state.attendance_manager.record_entry(sub_id):
+                                st.session_state.pop('selected_garage_spot', None)
+                                st.success("✅ تم")
+                                time.sleep(0.4)
+                                st.rerun()
+            else:
+                st.error("❌ لم يتم العثور على بيانات المشترك")
+        else:
+            visitor = visitor_manager.get_visitor_by_spot(spot_id)
+            if visitor:
+                st.markdown(f"### 🚗 زائر: {visitor['vehicle_number']}")
+                st.write(f"**🎫 التذكرة:** {visitor['ticket_number']}")
+                st.write(f"**📱 الهاتف:** {visitor.get('phone', '') or '-'}")
+                st.write(f"**⏱ الدخول:** {visitor['entry_time'][:16]}")
+                try:
+                    et = datetime.fromisoformat(visitor['entry_time'])
+                    dur = int((datetime.now() - et).total_seconds() / 60)
+                    st.write(f"**⏳ المدة:** {dur} دقيقة")
+                except Exception:
+                    pass
+
+                st.markdown("---")
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    if st.button("🖨️ إعادة طباعة الإيصال", key=f"dlg_reprint_{spot_id}",
+                                 use_container_width=True, type="primary"):
+                        fields = [
+                            {'label': 'التذكرة', 'value': visitor['ticket_number']},
+                            {'label': 'التاريخ', 'value': visitor['entry_time'][:16]},
+                            {'label': 'رقم السيارة', 'value': visitor['vehicle_number']},
+                            {'label': 'النوع', 'value': visitor.get('vehicle_type', 'سيارة')},
+                        ]
+                        if visitor.get('phone'):
+                            fields.append({'label': 'الهاتف', 'value': visitor['phone']})
+                        if visitor.get('spot_id'):
+                            fields.append({'label': 'المكان', 'value': get_spot_location(visitor['spot_id'])})
+                        st.session_state['receipt_data'] = {
+                            'title': "🅿️ إيصال دخول (إعادة طباعة)",
+                            'fields': fields,
+                            'qr_data': visitor['ticket_number'],
+                            'barcode_data': visitor['ticket_number'],
+                            'footer_text': "إعادة طباعة - احتفظ بالإيصال",
+                            'movement_number': visitor.get('movement_number')
+                        }
+                        st.session_state.pop('selected_garage_spot', None)
+                        st.rerun()
+                with cc2:
+                    if st.button("✖ إغلاق", key=f"dlg_close_v_{spot_id}", use_container_width=True):
+                        st.session_state.pop('selected_garage_spot', None)
+                        st.rerun()
+            else:
+                st.warning("⚠️ لا يوجد مشترك أو زائر مرتبط بهذا المكان")
+    else:
+        st.info("🟢 المكان متاح")
+        if st.button("✖ إغلاق", key=f"dlg_close_a_{spot_id}", use_container_width=True):
+            st.session_state.pop('selected_garage_spot', None)
+            st.rerun()
 # ⭐⭐⭐ عرض الجراج ⭐⭐⭐
 # ===================================================================
 def show_garage_view(manager, visitor_manager):
@@ -3721,6 +3991,45 @@ def show_garage_view(manager, visitor_manager):
     spots_map = get_all_spots_map(manager.db.db_path)
     inside_subs = get_cached_inside_subscribers(manager.db.db_path)
 
+    # ========================================================
+    # ⭐⭐⭐ المكان المختار ⭐⭐⭐
+    # ========================================================
+    selected_spot_id = st.session_state.get('selected_garage_spot')
+    _has_selection = bool(selected_spot_id and selected_spot_id in spots_map)
+
+    # ────────────────────────────────────────────────────────
+    # الحالة 1: مكان مختار + st.dialog متاح → modal overlay
+    #         (الشبكة تظهر عادي ورا المودال)
+    # ────────────────────────────────────────────────────────
+    if _has_selection and _get_dialog_decorator():
+        info = spots_map[selected_spot_id]
+        _dialog = _get_dialog_decorator()
+
+        @_dialog("📍 تفاصيل المكان", width="large")
+        def _spot_dialog():
+            _render_spot_details_body(manager, visitor_manager,
+                                      selected_spot_id, info, inside_subs)
+
+        _spot_dialog()
+        # ⭐ نكمل عادي — الشبكة تظهر ورا المودال
+        #    مفيش تفاصيل تحت — المودال هو اللي بيعرضها
+
+    # ────────────────────────────────────────────────────────
+    # الحالة 2: مكان مختار + مفيش st.dialog → شاشة كاملة
+    #         (بدون شبكة — التفاصيل لوحدها)
+    # ────────────────────────────────────────────────────────
+    elif _has_selection:
+        info = spots_map[selected_spot_id]
+        st.markdown(f"## 📍 تفاصيل: {get_spot_location(selected_spot_id)}")
+        with st.container(border=True):
+            _render_spot_details_body(manager, visitor_manager,
+                                      selected_spot_id, info, inside_subs)
+        _scroll_to_top()
+        return   # ⭐ وقف — لا تعرض الشبكة
+
+    # ────────────────────────────────────────────────────────
+    # الحالة 3: مفيش مكان مختار → اعرض الشبكة عادي
+    # ────────────────────────────────────────────────────────
     c1, c2 = st.columns([1, 3])
     with c1:
         st.markdown(f"### 📊 {get_floor_name(selected_floor)}")
@@ -3733,7 +4042,6 @@ def show_garage_view(manager, visitor_manager):
 
     with c2:
         levels = sorted(manager.structure[selected_floor].keys())
-        selected_spot_id = st.session_state.get('selected_garage_spot')
         for level in levels:
             ln = manager.structure[selected_floor][level]['name']
             st.markdown(f"### 📍 {ln}")
@@ -3750,7 +4058,6 @@ def show_garage_view(manager, visitor_manager):
                         sid = manager.get_spot_id(selected_floor, level, num)
                         info = spots_map.get(sid)
                         if info:
-                            is_sel = (selected_spot_id == sid)
                             if info['status'] == 'available':
                                 label = f"🟢{num}"
                             elif info['status'] == 'subscriber_out':
@@ -3763,110 +4070,10 @@ def show_garage_view(manager, visitor_manager):
                                     label = f"🔴{num}"
                             else:
                                 label = f"⚪{num}"
-                            if is_sel:
-                                label = f"🔵{num}"
                             with cols[ci]:
                                 if st.button(label, key=f"view_spot_{sid}"):
-                                    if selected_spot_id == sid:
-                                        st.session_state.pop('selected_garage_spot', None)
-                                    else:
-                                        st.session_state['selected_garage_spot'] = sid
+                                    st.session_state['selected_garage_spot'] = sid
                                     st.rerun()
-
-    selected_spot_id = st.session_state.get('selected_garage_spot')
-    if selected_spot_id:
-        info = spots_map.get(selected_spot_id)
-        if info:
-            st.markdown("---")
-            st.markdown(f"### 📍 تفاصيل: {get_spot_location(selected_spot_id)}")
-            status_map = {'available': '🟢 متاح', 'occupied': '🔴 مشغول',
-                          'subscriber_out': '🟡 محفوظ لمشترك (خارج حالياً)'}
-            st.write(f"**الحالة:** {status_map.get(info['status'], info['status'])}")
-            if info['status'] in ('occupied', 'subscriber_out'):
-                sub_id = info.get('subscriber_id')
-                if sub_id:
-                    sub = manager.get_subscriber(sub_id)
-                    if sub:
-                        is_inside = sub_id in inside_subs
-                        st.write(f"**👤 الاسم:** {sub['name']}")
-                        st.write(f"**🚗 السيارة:** {sub['car_number']}")
-                        st.write(f"**📱 الهاتف:** {sub['phone']}")
-                        st.write(f"**📅 نهاية الاشتراك:** {sub['subscription_end'][:10] if sub['subscription_end'] else ''}")
-                        st.write(f"**الحضور:** {'🟢 داخل الجراج' if is_inside else '🔴 خارج الجراج (المكان متاح مؤقتاً)'}")
-                        c1, c2, c3 = st.columns(3)
-                        with c1:
-                            if st.button("🔄 تجديد", key=f"gr_{sub_id}"):
-                                st.session_state['renew_subscriber_id'] = sub_id
-                                st.session_state['_goto_page'] = "👤 إدارة المشتركين"
-                                st.rerun()
-                        with c2:
-                            if st.button("🎫 كارت", key=f"gc_{sub_id}"):
-                                st.session_state['show_subscriber_card'] = sub_id
-                                st.session_state['_goto_page'] = "👤 إدارة المشتركين"
-                                st.rerun()
-                        with c3:
-                            if st.button("✖ إلغاء", key=f"gd_{selected_spot_id}"):
-                                st.session_state.pop('selected_garage_spot', None)
-                                st.rerun()
-                        c4, c5 = st.columns(2)
-                        with c4:
-                            if is_inside:
-                                if st.button("📤 تسجيل خروج المشترك", key=f"exit_sub_{sub_id}", use_container_width=True):
-                                    if st.session_state.attendance_manager.record_exit(sub_id):
-                                        st.success("✅ تم - المكان أصبح متاحاً للزوار")
-                                        time.sleep(0.4)
-                                        st.rerun()
-                        with c5:
-                            if not is_inside:
-                                if st.button("📥 تسجيل دخول المشترك", key=f"enter_sub_{sub_id}", use_container_width=True):
-                                    if st.session_state.attendance_manager.record_entry(sub_id):
-                                        st.success("✅ تم")
-                                        time.sleep(0.4)
-                                        st.rerun()
-                else:
-                    visitor = visitor_manager.get_visitor_by_spot(selected_spot_id)
-                    if visitor:
-                        st.write(f"**🚗 زائر:** {visitor['vehicle_number']}")
-                        st.write(f"**📱 الهاتف:** {visitor.get('phone', '') or '-'}")
-                        st.write(f"**🎫 التذكرة:** {visitor['ticket_number']}")
-                        st.write(f"**⏱ الدخول:** {visitor['entry_time'][:16]}")
-                        try:
-                            et = datetime.fromisoformat(visitor['entry_time'])
-                            dur = int((datetime.now() - et).total_seconds() / 60)
-                            st.write(f"**⏳ المدة:** {dur} دقيقة")
-                        except Exception:
-                            pass
-                        cc1, cc2 = st.columns(2)
-                        with cc1:
-                            if st.button("🖨️ إعادة طباعة الإيصال", key=f"reprint_{selected_spot_id}", use_container_width=True, type="primary"):
-                                fields = [
-                                    {'label': 'التذكرة', 'value': visitor['ticket_number']},
-                                    {'label': 'التاريخ', 'value': visitor['entry_time'][:16]},
-                                    {'label': 'رقم السيارة', 'value': visitor['vehicle_number']},
-                                    {'label': 'النوع', 'value': visitor.get('vehicle_type', 'سيارة')},
-                                ]
-                                if visitor.get('phone'):
-                                    fields.append({'label': 'الهاتف', 'value': visitor['phone']})
-                                if visitor.get('spot_id'):
-                                    fields.append({'label': 'المكان', 'value': get_spot_location(visitor['spot_id'])})
-                                st.session_state['receipt_data'] = {
-                                    'title': "🅿️ إيصال دخول (إعادة طباعة)",
-                                    'fields': fields,
-                                    'qr_data': visitor['ticket_number'],  # ⭐
-                                    'barcode_data': visitor['ticket_number'],
-                                    'footer_text': "إعادة طباعة - احتفظ بالإيصال",
-                                    'movement_number': visitor.get('movement_number')
-                                }
-                                st.rerun()
-                        with cc2:
-                            if st.button("✖ إلغاء", key=f"gdv_{selected_spot_id}", use_container_width=True):
-                                st.session_state.pop('selected_garage_spot', None)
-                                st.rerun()
-            else:
-                if st.button("✖ إلغاء", key=f"gda_{selected_spot_id}"):
-                    st.session_state.pop('selected_garage_spot', None)
-                    st.rerun()
-
 
 # ===================================================================
 # ⭐⭐⭐ إدارة المشتركين ⭐⭐⭐
@@ -4087,16 +4294,56 @@ def manage_subscribers(manager):
     tabs = st.tabs(["➕ إضافة مشترك", "📋 قائمة المشتركين", "🔄 تجديد"])
 
     with tabs[0]:
-        with st.form("add_sub_form_stable", clear_on_submit=True):
+        # ⭐⭐ تهيئة
+        if 'scanned_card' not in st.session_state:
+            st.session_state['scanned_card'] = ''
+        if 'rfid_ver' not in st.session_state:
+            st.session_state['rfid_ver'] = 0
+
+        st.markdown("### 🎫 امسح كارت RFID أو اكتبه يدوياً")
+
+        # ⭐⭐ key ديناميكي — زر "مسح" بيغيّره عشان يفضي الحقل
+        rfid_key = f"rfid_scanner_input_v{st.session_state['rfid_ver']}"
+
+        rfid_col1, rfid_col2 = st.columns([3, 1])
+        with rfid_col1:
+            rfid_raw = st.text_input(
+                "📡 امسح الكارت أو اكتب الرقم",
+                key=rfid_key,
+                placeholder="امسح الكارت أو اكتب الرقم ثم اضغط Enter..."
+            )
+        with rfid_col2:
+            st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+            if st.button("🗑️ مسح", key="clear_rfid", use_container_width=True):
+                st.session_state['scanned_card'] = ''
+                st.session_state['rfid_ver'] += 1   # ⭐ key جديد = widget جديد فاضي
+                st.rerun()
+
+        # ⭐⭐ حفظ القيمة — يدوي أو من القارئ
+        if rfid_raw:
+            clean = rfid_raw.replace('\r', '').replace('\n', '').strip()
+            if clean and clean != st.session_state.get('scanned_card', ''):
+                st.session_state['scanned_card'] = clean
+
+        # ⭐⭐ عرض الكارت الممسوح
+        scanned = st.session_state.get('scanned_card', '')
+        if scanned:
+            st.success(f"🎫 **الكارت:** `{scanned}`")
+        else:
+            st.info("👉 امسح الكارت أو اكتبه يدوياً — القيمة هتتحفظ تلقائياً")
+
+        st.markdown("---")
+
+        # ⭐ الـ form — من غير حقل الكارت
+        with st.form("add_sub_form_stable", clear_on_submit=False):
             c1, c2 = st.columns(2)
             with c1:
                 n = st.text_input("👤 الاسم *", key="add_n")
                 w = st.text_input("🏢 جهة العمل", key="add_w")
-                cn = st.text_input("🚗 رقم الكارت *", key="add_cn")
             with c2:
                 ct = st.text_input("🚙 النوع", key="add_ct")
                 cc = st.text_input("🎨 رقم السيارة", key="add_cc")
-                ph = st.text_input("📱 الهاتف *", key="add_ph")
+            ph = st.text_input("📱 الهاتف *", key="add_ph")
 
             stype = st.selectbox("📅 الاشتراك", list(manager.subscription_plans.keys()), key="add_stype")
             sd = st.date_input("📅 البداية", datetime.now(), key="add_sd")
@@ -4106,7 +4353,13 @@ def manage_subscribers(manager):
             _submitted = st.form_submit_button("✅ إضافة", use_container_width=True)
 
             if _submitted:
-                if n and cn and ph:
+                cn = st.session_state.get('scanned_card', '').strip()
+
+                if not cn:
+                    st.error("❌ امسح كارت RFID أو اكتبه يدوياً أولاً")
+                elif not (n and ph):
+                    st.error("❌ املأ الحقول المطلوبة (*)")
+                else:
                     d = {
                         'name': n, 'workplace': w, 'car_number': cn,
                         'car_type': ct, 'car_color': cc, 'phone': ph,
@@ -4116,14 +4369,15 @@ def manage_subscribers(manager):
                     }
                     sid = manager.add_subscriber(d)
                     if sid:
+                        # ⭐ امسح الكارت بعد النجاح
+                        st.session_state['scanned_card'] = ''
+                        st.session_state['rfid_ver'] += 1
                         st.success(f"✅ تمت الإضافة: {sid}")
                         clear_all_caches()
                         time.sleep(1)
                         st.rerun()
                     else:
                         st.error("❌ رقم الكارت مستخدم بالفعل")
-                else:
-                    st.error("❌ املأ الحقول المطلوبة (*)")
     with tabs[1]:
         # ⭐ البحث المتكامل فوق (زي الدخول والخروج)
         st.markdown("### 🔍 بحث في المشتركين")
@@ -4412,13 +4666,33 @@ def entry_page(manager, visitor_manager, attendance_manager):
             if st.form_submit_button("✅ تسجيل الدخول", use_container_width=True):
                 if not vn:
                     st.error("❌ أدخل رقم السيارة")
+
+                # ⭐⭐⭐ فحص الكارت — أهم إضافة
+                elif vc and vc.strip():
+                    in_use, kind, info = visitor_manager.is_card_in_use(vc.strip())
+                    if in_use:
+                        if kind == 'visitor':
+                            st.error(f"❌ **رقم الكارت `{vc.strip()}` مستخدم بالفعل!**")
+                            st.warning(
+                                f"🎫 التذكرة الحالية: **{info['ticket_number']}**  \n"
+                                f"🚗 السيارة: **{info['vehicle_number']}**  \n"
+                                f"🕐 دخل في: **{info['entry_time'][:16]}**"
+                            )
+                            st.info("👉 **يجب تسجيل خروج الزائر أولاً** ثم يمكن استخدام الكارت مرة أخرى.")
+                        else:  # subscriber
+                            st.error(f"❌ **رقم الكارت `{vc.strip()}` مسجّل لمشترك نشط!**")
+                            st.warning(f"👤 الاسم: **{info['name']}**")
+                            st.info("👉 استخدم تبويب **'👤 دخول مشترك'** أو اختر كارت آخر للزائر.")
+
+                # ⭐ نفس الفحوصات القديمة
                 elif vn.strip().upper().startswith('SUB_') or vn.strip().upper().startswith('SUB-'):
                     st.error("❌ هذا رقم كارت مشترك! استخدم تبويب '👤 دخول مشترك' من فضلك")
                 else:
                     existing_sub = manager.get_subscriber_by_car_number(vn.strip())
                     if existing_sub:
                         st.error(f"❌ **هذا الرقم مسجل كمشترك بالفعل!**")
-                        st.warning(f"👤 **الاسم:** {existing_sub.get('name', '')} | 🚗 **الكارت:** {existing_sub.get('car_number', '')}")
+                        st.warning(
+                            f"👤 **الاسم:** {existing_sub.get('name', '')} | 🚗 **الكارت:** {existing_sub.get('car_number', '')}")
                         st.info("👉 استخدم تبويب **'👤 دخول مشترك'** لتسجيل دخوله")
                     elif not st.session_state.get('selected_entry_spot'):
                         st.error("❌ اختر مكاناً")
@@ -4433,18 +4707,16 @@ def entry_page(manager, visitor_manager, attendance_manager):
                                 {'label': 'النوع', 'value': vt},
                             ]
                             if vp: fields.append({'label': 'الهاتف', 'value': vp})
-                            if vc:
-                                fields.append({'label': 'رقم الكارت', 'value': vc})
+                            if vc: fields.append({'label': 'رقم الكارت', 'value': vc})
                             if sid:
                                 fields.append({'label': 'المكان', 'value': get_spot_location(sid)})
                                 st.session_state.pop('selected_entry_spot', None)
                             st.session_state['receipt_data'] = {
                                 'title': "🅿️ إيصال دخول", 'fields': fields,
-                                'qr_data': ticket, 'barcode_data': ticket,  # ⭐ QR = رقم التذكرة
+                                'qr_data': ticket, 'barcode_data': ticket,
                                 'footer_text': "احتفظ بالإيصال", 'movement_number': mv
                             }
                             st.rerun()
-
     with tab2:
         st.markdown("**📌 أدخل رقم الكارت أو امسح QR**")
         ident = st.text_input("🔍 رقم الكارت / المعرف / QR", key="entry_sub_id",
@@ -4455,15 +4727,80 @@ def entry_page(manager, visitor_manager, attendance_manager):
             if not sub:
                 st.error("❌ غير موجود")
             else:
-                st.write(f"**الاسم:** {sub['name']}")
-                st.write(f"**الاشتراك:** {sub['subscription_type']}")
-                st.write(f"**ينتهي:** {sub['subscription_end'][:10] if sub.get('subscription_end') else ''}")
+                # ⭐⭐⭐ كارت البيانات الكامل ⭐⭐⭐
+                st.markdown(f"""
+                <div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+                            color:white; border-radius:12px; padding:15px; margin:10px 0;">
+                    <h2 style="margin:0; font-size:22px;">👤 {sub['name']}</h2>
+                    <p style="margin:5px 0 0 0; opacity:0.9;">🎫 {sub.get('car_number','')}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown(f"""
+                    <div style="background:white; border-radius:10px; padding:12px; margin:5px 0;
+                                border-right:4px solid #667eea;">
+                        <div style="font-size:12px; color:#888;">🚗 رقم العربية</div>
+                        <div style="font-size:16px; font-weight:bold; color:#333;">
+                            {sub.get('car_color', '') or '—'}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.markdown(f"""
+                    <div style="background:white; border-radius:10px; padding:12px; margin:5px 0;
+                                border-right:4px solid #4CAF50;">
+                        <div style="font-size:12px; color:#888;">🚙 نوع السيارة</div>
+                        <div style="font-size:16px; font-weight:bold; color:#333;">
+                            {sub.get('car_type', '') or '—'}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.markdown(f"""
+                    <div style="background:white; border-radius:10px; padding:12px; margin:5px 0;
+                                border-right:4px solid #2196F3;">
+                        <div style="font-size:12px; color:#888;">📱 الهاتف</div>
+                        <div style="font-size:16px; font-weight:bold; color:#333; direction:ltr; text-align:right;">
+                            {sub.get('phone', '') or '—'}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with c2:
+                    st.markdown(f"""
+                    <div style="background:white; border-radius:10px; padding:12px; margin:5px 0;
+                                border-right:4px solid #ff9800;">
+                        <div style="font-size:12px; color:#888;">🏢 جهة العمل</div>
+                        <div style="font-size:16px; font-weight:bold; color:#333;">
+                            {sub.get('workplace', '') or '—'}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.markdown(f"""
+                    <div style="background:white; border-radius:10px; padding:12px; margin:5px 0;
+                                border-right:4px solid #9C27B0;">
+                        <div style="font-size:12px; color:#888;">📅 نوع الاشتراك</div>
+                        <div style="font-size:16px; font-weight:bold; color:#333;">
+                            {sub.get('subscription_type', '') or '—'}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.markdown(f"""
+                    <div style="background:white; border-radius:10px; padding:12px; margin:5px 0;
+                                border-right:4px solid #f44336;">
+                        <div style="font-size:12px; color:#888;">📅 نهاية الاشتراك</div>
+                        <div style="font-size:16px; font-weight:bold; color:#333;">
+                            {sub['subscription_end'][:10] if sub.get('subscription_end') else '—'}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
                 if sub.get('spot_id'):
-                    st.info(f"🅿️ **رقم مكان الركنة:** {get_spot_location(sub['spot_id'])}")
+                    st.info(f"🅿️ **مكان الركنة:** {get_spot_location(sub['spot_id'])}")
                 else:
                     st.warning("⚠️ لا يوجد مكان ركنة مخصص لهذا المشترك")
 
-                # ⭐ فحص اشتراك التطبيق
+                st.markdown("---")
+
                 # ⭐ فحص اشتراك التطبيق
                 status, days, msg = get_subscriber_app_status(manager.db, sub)
 
@@ -4473,34 +4810,40 @@ def entry_page(manager, visitor_manager, attendance_manager):
                     st.error(f"❌ {msg}")
                     st.warning("💡 يجب دفع اشتراك استخدام التطبيق أولاً")
                     try:
-                        _r = manager.db.execute_query("SELECT value FROM parking_settings WHERE key='instapay_number'",
-                                                      fetch=True)
+                        _r = manager.db.execute_query(
+                            "SELECT value FROM parking_settings WHERE key='instapay_number'",
+                            fetch=True
+                        )
                         _insta = _r[0]['value'] if _r and _r[0]['value'] else ''
                     except Exception:
                         _insta = ''
-
                     if _insta:
                         st.info(f"👉 **حوّل {APP_FEE_DEFAULT:.0f} جنيه عبر InstaPay إلى:** `{_insta}`")
                     else:
-                        st.info(f"👉 **تواصل مع الإدارة لمعرفة رقم الدفع**")
+                        st.info("👉 **تواصل مع الإدارة لمعرفة رقم الدفع**")
                 else:
-                    current_att = attendance_manager.get_current_status(sub['id'])
-                    if current_att:
-                        st.success(f"🕐 **وقت الدخول الحالي:** {current_att['entry_time'][:16]}")
-                        st.info("🟢 داخل بالفعل")
+                    _conflict, _kind, _info = visitor_manager.is_card_in_use(sub.get('car_number', ''))
+                    if _conflict and _kind == 'visitor':
+                        st.error(f"❌ **الكارت `{sub['car_number']}` مستخدم حالياً لزائر نشط!**")
+                        st.warning(f"🎫 التذكرة: {_info['ticket_number']} | 🚗 {_info['vehicle_number']}")
+                        st.info("👉 سجّل خروج الزائر أولاً.")
                     else:
-                        if sub.get('subscription_end') and datetime.fromisoformat(
-                                sub['subscription_end']) < datetime.now():
-                            st.error("⚠️ اشتراك الجراج منتهي!")
+                        current_att = attendance_manager.get_current_status(sub['id'])
+                        if current_att:
+                            st.success(f"🕐 **داخل بالفعل** — وقت الدخول: {current_att['entry_time'][:16]}")
                         else:
-                            if st.button("📥 تسجيل دخول", key="entry_sub_btn", use_container_width=True):
-                                if attendance_manager.record_entry(sub['id']):
-                                    st.success("✅ تم")
-                                    time.sleep(0.3)
-                                    st.rerun()
-                                else:
-                                    st.error("❌ فشل - تحقق من اشتراك التطبيق")
-# ===================================================================
+                            if sub.get('subscription_end') and datetime.fromisoformat(
+                                    sub['subscription_end']) < datetime.now():
+                                st.error("⚠️ اشتراك الجراج منتهي!")
+                            else:
+                                if st.button("📥 تسجيل دخول", key="entry_sub_btn",
+                                             use_container_width=True, type="primary"):
+                                    if attendance_manager.record_entry(sub['id']):
+                                        st.success("✅ تم تسجيل الدخول")
+                                        time.sleep(0.3)
+                                        st.rerun()
+                                    else:
+                                        st.error("❌ فشل - تحقق من اشتراك التطبيق")
 # ⭐⭐⭐ صفحة الخروج ⭐⭐⭐
 # ===================================================================
 def exit_page(manager, visitor_manager, attendance_manager):
@@ -4584,27 +4927,103 @@ def exit_page(manager, visitor_manager, attendance_manager):
                 st.error("❌ غير موجود")
 
     with tab2:
-        ident = st.text_input("🔍 المعرف/رقم السيارة", key="exit_sub_id")
+        st.markdown("**📌 أدخل رقم الكارت أو امسح QR**")
+        ident = st.text_input("🔍 رقم الكارت / المعرف / QR", key="exit_sub_id",
+                               placeholder="امسح الـ QR أو اكتب رقم الكارت")
+
         if ident:
-            sub = manager.get_subscriber_by_id_or_car(ident)
+            sub = manager.get_subscriber_by_id_or_car(ident.strip())
             if not sub:
                 st.error("❌ غير موجود")
             else:
-                st.write(f"**الاسم:** {sub['name']}")
+                # ⭐⭐⭐ كارت البيانات الكامل — نفس الدخول ⭐⭐⭐
+                st.markdown(f"""
+                <div style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+                            color:white; border-radius:12px; padding:15px; margin:10px 0;">
+                    <h2 style="margin:0; font-size:22px;">👤 {sub['name']}</h2>
+                    <p style="margin:5px 0 0 0; opacity:0.9;">🎫 {sub.get('car_number','')}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown(f"""
+                    <div style="background:white; border-radius:10px; padding:12px; margin:5px 0;
+                                border-right:4px solid #667eea;">
+                        <div style="font-size:12px; color:#888;">🚗 رقم العربية</div>
+                        <div style="font-size:16px; font-weight:bold; color:#333;">
+                            {sub.get('car_color', '') or '—'}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.markdown(f"""
+                    <div style="background:white; border-radius:10px; padding:12px; margin:5px 0;
+                                border-right:4px solid #4CAF50;">
+                        <div style="font-size:12px; color:#888;">🚙 نوع السيارة</div>
+                        <div style="font-size:16px; font-weight:bold; color:#333;">
+                            {sub.get('car_type', '') or '—'}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.markdown(f"""
+                    <div style="background:white; border-radius:10px; padding:12px; margin:5px 0;
+                                border-right:4px solid #2196F3;">
+                        <div style="font-size:12px; color:#888;">📱 الهاتف</div>
+                        <div style="font-size:16px; font-weight:bold; color:#333; direction:ltr; text-align:right;">
+                            {sub.get('phone', '') or '—'}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with c2:
+                    st.markdown(f"""
+                    <div style="background:white; border-radius:10px; padding:12px; margin:5px 0;
+                                border-right:4px solid #ff9800;">
+                        <div style="font-size:12px; color:#888;">🏢 جهة العمل</div>
+                        <div style="font-size:16px; font-weight:bold; color:#333;">
+                            {sub.get('workplace', '') or '—'}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.markdown(f"""
+                    <div style="background:white; border-radius:10px; padding:12px; margin:5px 0;
+                                border-right:4px solid #9C27B0;">
+                        <div style="font-size:12px; color:#888;">📅 نوع الاشتراك</div>
+                        <div style="font-size:16px; font-weight:bold; color:#333;">
+                            {sub.get('subscription_type', '') or '—'}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.markdown(f"""
+                    <div style="background:white; border-radius:10px; padding:12px; margin:5px 0;
+                                border-right:4px solid #f44336;">
+                        <div style="font-size:12px; color:#888;">📅 نهاية الاشتراك</div>
+                        <div style="font-size:16px; font-weight:bold; color:#333;">
+                            {sub['subscription_end'][:10] if sub.get('subscription_end') else '—'}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
                 if sub.get('spot_id'):
-                    st.info(f"🅿️ **رقم مكان الركنة:** {get_spot_location(sub['spot_id'])}")
+                    st.info(f"🅿️ **مكان الركنة:** {get_spot_location(sub['spot_id'])}")
+                else:
+                    st.warning("⚠️ لا يوجد مكان ركنة مخصص لهذا المشترك")
+
+                st.markdown("---")
+
+                # ⭐ حالة الحضور + زر الخروج
                 cur = attendance_manager.get_current_status(sub['id'])
                 if not cur:
-                    st.info("🔴 خارج الجراج")
+                    st.info("🔴 **خارج الجراج بالفعل** — لا يحتاج تسجيل خروج")
                 else:
-                    st.success(f"🕐 **وقت الدخول:** {cur['entry_time'][:16]}")
-                    if st.button("📤 خروج", key="exit_sub_btn", use_container_width=True):
+                    st.success(f"🕐 **داخل الجراج** — وقت الدخول: {cur['entry_time'][:16]}")
+                    if st.button("📤 تسجيل خروج المشترك", key="exit_sub_btn",
+                                 use_container_width=True, type="primary"):
                         if attendance_manager.record_exit(sub['id']):
-                            st.success("✅ تم - المكان أصبح متاحاً للزوار")
+                            st.success("✅ تم تسجيل الخروج — المكان أصبح متاحاً للزوار")
                             time.sleep(0.3)
                             st.rerun()
-
-
+                        else:
+                            st.error("❌ فشل تسجيل الخروج")
 # ===================================================================
 # ⭐⭐⭐ التقارير ⭐⭐⭐
 # ===================================================================
@@ -5003,12 +5422,17 @@ def show_shift_management(db, manager):
         st.success(f"🟢 وردية مفتوحة - {current_shift['opened_by']} في {current_shift['opened_at'][:16]}")
         opened_at = current_shift['opened_at']
         now = datetime.now().isoformat()
-        tr, te, tex, vr, sr = manager.get_shift_financial_data(opened_at, now)
-        st.info(f"**إجمالي:** {tr:.2f} | **زوار:** {vr:.2f} | **مشتركين:** {sr:.2f} | **دخول:** {te} | **خروج:** {tex}")
 
+        # ⭐ يوزر الخروج — ميشوفش البيانات
+        if ur == 'exit':
+            tr = te = tex = vr = sr = 0
+        else:
+            tr, te, tex, vr, sr = manager.get_shift_financial_data(opened_at, now)
+            st.info(
+                f"**إجمالي:** {tr:.2f} | **زوار:** {vr:.2f} | **مشتركين:** {sr:.2f} | **دخول:** {te} | **خروج:** {tex}")
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("🖨️ طباعة الإجماليات", use_container_width=True, key="print_cur_totals"):
+            if ur != 'exit' and st.button("🖨️ طباعة الإجماليات", use_container_width=True, key="print_cur_totals"):
                 fields = [
                     {'label': 'الوردية', 'value': 'الحالية'},
                     {'label': 'افتتحت بواسطة', 'value': current_shift['opened_by']},
@@ -5029,10 +5453,13 @@ def show_shift_management(db, manager):
             if ur in ['exit', 'admin', 'manager', 'super_admin']:
                 if st.button("🔒 إغلاق الوردية", use_container_width=True, key="close_shift_btn"):
                     st.session_state['confirm_close_shift'] = True
-                    st.session_state['shift_close_data'] = {
-                        'total_revenue': tr, 'total_entries': te, 'total_exits': tex,
-                        'visitor_revenue': vr, 'subscriber_revenue': sr, 'opened_at': opened_at
-                    }
+                    if ur == 'exit':
+                        st.session_state['shift_close_data'] = {'opened_at': opened_at}
+                    else:
+                        st.session_state['shift_close_data'] = {
+                            'total_revenue': tr, 'total_entries': te, 'total_exits': tex,
+                            'visitor_revenue': vr, 'subscriber_revenue': sr, 'opened_at': opened_at
+                        }
                     st.rerun()
             else:
                 st.button("🔒 إغلاق", use_container_width=True, disabled=True, key="close_dis")
@@ -5108,6 +5535,9 @@ def show_shift_management(db, manager):
                         st.caption(f"إجمالي: {len(data)} حركة")
                     else:
                         st.info("لا توجد حركات في هذه الوردية")
+
+
+
 def show_data_cleanup(db):
     st.markdown("## 🗑️ مسح البيانات")
     st.error("⚠️ لا يمكن التراجع!")
@@ -5414,13 +5844,17 @@ def main():
             if ur in ['exit', 'admin', 'manager', 'super_admin']:
                 if st.button("🔒 إغلاق الوردية", use_container_width=True, key="sb_close_shift"):
                     opened_at = current_shift['opened_at']
-                    now = datetime.now().isoformat()
-                    tr, te, tex, vr, sr = manager.get_shift_financial_data(opened_at, now)
+                    if ur == 'exit':
+                        # ⭐ يوزر الخروج — مش محتاج نشوف البيانات
+                        st.session_state['shift_close_data'] = {'opened_at': opened_at}
+                    else:
+                        now = datetime.now().isoformat()
+                        tr, te, tex, vr, sr = manager.get_shift_financial_data(opened_at, now)
+                        st.session_state['shift_close_data'] = {
+                            'total_revenue': tr, 'total_entries': te, 'total_exits': tex,
+                            'visitor_revenue': vr, 'subscriber_revenue': sr, 'opened_at': opened_at
+                        }
                     st.session_state['confirm_close_shift'] = True
-                    st.session_state['shift_close_data'] = {
-                        'total_revenue': tr, 'total_entries': te, 'total_exits': tex,
-                        'visitor_revenue': vr, 'subscriber_revenue': sr, 'opened_at': opened_at
-                    }
                     st.rerun()
         else:
             st.warning("🔴 لا توجد وردية")
@@ -5583,7 +6017,7 @@ def main():
         elif ur == 'entry':
             menu_items.extend(["🏠 لوحة التحكم", "🗺️ عرض الجراج", "📥 دخول", "📜 سجل العمليات"])
         elif ur == 'exit':
-            menu_items.extend(["🏠 لوحة التحكم", "📤 خروج", "📜 سجل العمليات"])
+            menu_items.extend(["🏠 لوحة التحكم", "🗺️ عرض الجراج", "📤 خروج", "📜 سجل العمليات"])
         elif ur == 'subscriber':
             menu_items.extend([
                 "🏠 لوحة التحكم", "🗺️ عرض الجراج", "👤 إدارة المشتركين",
