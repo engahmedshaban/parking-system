@@ -1261,6 +1261,118 @@ class Database:
 
             conn.create_function("nrm", 1, _nrm)
             yield conn
+    def execute_query(self, query, params=None, commit=False, fetch=False):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            if getattr(self, 'is_pg', False):
+                query = query.replace('?', '%s')
+                query = query.replace('nrm(', 'LOWER(')
+
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+            if fetch:
+                return cursor.fetchall()
+            return None
+
+    def init_db(self):
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                # إنشاء الجداول لو إحنا شغالين على SQLite محلياً
+                if not getattr(self, 'is_pg', False):
+                    cursor.execute('''CREATE TABLE IF NOT EXISTS users
+                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
+                                       password TEXT NOT NULL, role TEXT NOT NULL, full_name TEXT,
+                                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+                    cursor.execute('''CREATE TABLE IF NOT EXISTS subscribers
+                                      (id TEXT PRIMARY KEY, name TEXT NOT NULL, workplace TEXT,
+                                       car_number TEXT, car_type TEXT, car_color TEXT, phone TEXT,
+                                       subscription_type TEXT, subscription_start TEXT, subscription_end TEXT,
+                                       payment_amount REAL, payment_status TEXT, status TEXT,
+                                       spot_id TEXT, registration_date TEXT, assigned_date TEXT)''')
+                    cursor.execute('''CREATE TABLE IF NOT EXISTS spots
+                                      (id TEXT PRIMARY KEY, floor INTEGER, level INTEGER, number INTEGER,
+                                       is_occupied INTEGER DEFAULT 0, subscriber_id TEXT, status TEXT)''')
+                    cursor.execute('''CREATE TABLE IF NOT EXISTS visitors
+                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_number TEXT UNIQUE NOT NULL,
+                                       entry_time TEXT NOT NULL, exit_time TEXT, vehicle_number TEXT,
+                                       vehicle_type TEXT, status TEXT DEFAULT 'inside', amount REAL DEFAULT 0,
+                                       payment_status TEXT DEFAULT 'pending', duration_minutes INTEGER DEFAULT 0,
+                                       created_at TEXT DEFAULT CURRENT_TIMESTAMP, spot_id TEXT,
+                                       movement_number INTEGER, phone TEXT)''')
+                    cursor.execute('''CREATE TABLE IF NOT EXISTS parking_settings (key TEXT PRIMARY KEY, value TEXT)''')
+                    cursor.execute('''CREATE TABLE IF NOT EXISTS financial_records
+                                      (id TEXT PRIMARY KEY, subscriber_id TEXT, type TEXT, amount REAL,
+                                       status TEXT, description TEXT, date TEXT, shift_id INTEGER)''')
+                    cursor.execute('''CREATE TABLE IF NOT EXISTS history
+                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, subscriber_id TEXT,
+                                       spot_id TEXT, details TEXT, date TEXT, movement_number INTEGER)''')
+                    cursor.execute('''CREATE TABLE IF NOT EXISTS subscriber_attendance
+                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, subscriber_id TEXT NOT NULL,
+                                       entry_time TEXT, exit_time TEXT, status TEXT DEFAULT 'outside',
+                                       created_at TEXT DEFAULT CURRENT_TIMESTAMP, movement_number INTEGER)''')
+                    cursor.execute('''CREATE TABLE IF NOT EXISTS shifts
+                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, opened_by TEXT, opened_at TEXT,
+                                       closed_by TEXT, closed_at TEXT, status TEXT DEFAULT 'open',
+                                       total_revenue REAL DEFAULT 0, total_entries INTEGER DEFAULT 0,
+                                       total_exits INTEGER DEFAULT 0, visitor_revenue REAL DEFAULT 0,
+                                       subscriber_revenue REAL DEFAULT 0, details TEXT)''')
+
+                # إضافة الإعدادات الافتراضية
+                defaults = {'first_hour_price': '20', 'second_hour_price': '10', 'free_minutes': '10',
+                            'printer_type': 'epson_tm', 'printer_port': 'USB001', 'paper_width': '80',
+                            'last_movement_number': '0', 'last_visitor_ticket_number': '0',
+                            'daily_max_charge': '250', 'auto_refresh_sec': '0',
+                            'hour_grace_minutes': '10', 'system_expiry_date': '',
+                            'garage_name': DEFAULT_GARAGE_NAME, 'app_fee': '10',
+                            'app_trial_days': '3', 'vodafone_cash_number': '',
+                            'trial_enabled': '1', 'garage_free_forever': '0', 'garage_free_until': ''}
+
+                for k, v in defaults.items():
+                    if getattr(self, 'is_pg', False):
+                        cursor.execute('INSERT INTO parking_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING', (k, v))
+                    else:
+                        cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)', (k, v))
+
+                # إضافة اليوزرات الافتراضية
+                for uname, pw, role, name in [
+                    ('admin', 'admin123', 'admin', 'مدير النظام'),
+                    ('manager', 'manager123', 'manager', 'مدير الجراج'),
+                    ('entry', 'entry123', 'entry', 'موظف دخول'),
+                    ('exit', 'exit123', 'exit', 'موظف خروج'),
+                    ('subscriber', 'sub123', 'subscriber', 'موظف المشتركين')
+                ]:
+                    hashed = hashlib.sha256(pw.encode()).hexdigest()
+                    if getattr(self, 'is_pg', False):
+                        cursor.execute('INSERT INTO users (username, password, role, full_name) VALUES (%s, %s, %s, %s) ON CONFLICT (username) DO NOTHING', (uname, hashed, role, name))
+                    else:
+                        cursor.execute('INSERT OR IGNORE INTO users (username, password, role, full_name) VALUES (?, ?, ?, ?)', (uname, hashed, role, name))
+
+                # إضافة الهيكل
+                if getattr(self, 'is_pg', False):
+                    cursor.execute("SELECT value FROM parking_settings WHERE key='garage_structure'")
+                    if not cursor.fetchone():
+                        structure_serializable = {str(f): {str(l): v for l, v in levels.items()} for f, levels in DEFAULT_STRUCTURE.items()}
+                        cursor.execute("INSERT INTO parking_settings (key, value) VALUES (%s, %s)", ('garage_structure', json.dumps(structure_serializable, ensure_ascii=False)))
+                    cursor.execute("SELECT value FROM parking_settings WHERE key='garage_floor_names'")
+                    if not cursor.fetchone():
+                        fn_serializable = {str(f): name for f, name in DEFAULT_FLOOR_NAMES.items()}
+                        cursor.execute("INSERT INTO parking_settings (key, value) VALUES (%s, %s)", ('garage_floor_names', json.dumps(fn_serializable, ensure_ascii=False)))
+                else:
+                    existing = self.execute_query("SELECT value FROM parking_settings WHERE key='garage_structure'", fetch=True)
+                    if not existing:
+                        structure_serializable = {str(f): {str(l): v for l, v in levels.items()} for f, levels in DEFAULT_STRUCTURE.items()}
+                        cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)', ('garage_structure', json.dumps(structure_serializable, ensure_ascii=False)))
+                    existing_fn = self.execute_query("SELECT value FROM parking_settings WHERE key='garage_floor_names'", fetch=True)
+                    if not existing_fn:
+                        fn_serializable = {str(f): name for f, name in DEFAULT_FLOOR_NAMES.items()}
+                        cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)', ('garage_floor_names', json.dumps(fn_serializable, ensure_ascii=False)))
+        except Exception as e:
+            app_log("error", f"فشل تهيئة قاعدة البيانات: {e}")
+
 def get_parking_settings(db):
     settings = {}
     result = db.execute_query('SELECT key, value FROM parking_settings', fetch=True)
