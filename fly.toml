@@ -1,4 +1,4 @@
-app = "parking-system"
+app = "parking-systems"
 primary_region = "ams" # أو المنطقة اللي اخترتها
 
 [build]
