@@ -929,153 +929,133 @@ def revoke_subscriber_sessions(db, subscriber_id, reason="manual"):
 # ===================================================================
 @st.cache_data(ttl=3, show_spinner=False)
 def get_cached_dashboard_stats(db_path):
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
+    db = Database(db_path)
     try:
-        cur = conn.cursor()
         now_iso = datetime.now().isoformat()
-        cur.execute('''SELECT
+        query = '''SELECT
             (SELECT COUNT(*) FROM spots) as total_spots,
             (SELECT COUNT(*) FROM spots WHERE is_occupied=1) as occupied_spots,
             (SELECT COUNT(*) FROM subscribers) as total_subscribers,
-            (SELECT COUNT(*) FROM subscribers 
-             WHERE subscription_end >= ? 
-               AND status = 'active') as active_subscribers
-        ''', (now_iso,))
-        row = cur.fetchone()
-        return {
-            'total': row['total_spots'],
-            'occupied': row['occupied_spots'],
-            'subs': row['total_subscribers'],
-            'active_subs': row['active_subscribers'],   # ⭐
-        }
-    finally:
-        conn.close()
-
+            (SELECT COUNT(*) FROM subscribers WHERE subscription_end >= ? AND status = 'active') as active_subscribers
+        '''
+        result = db.execute_query(query, (now_iso,), fetch=True)
+        if result and len(result) > 0:
+            row = result[0]
+            return {
+                'total': row['total_spots'],
+                'occupied': row['occupied_spots'],
+                'subs': row['total_subscribers'],
+                'active_subs': row['active_subscribers'],
+            }
+        return {'total': 0, 'occupied': 0, 'subs': 0, 'active_subs': 0}
+    except Exception:
+        return {'total': 0, 'occupied': 0, 'subs': 0, 'active_subs': 0}
 
 @st.cache_data(ttl=3, show_spinner=False)
 def get_cached_inside_subscribers(db_path):
-    conn = sqlite3.connect(db_path, timeout=30)
+    db = Database(db_path)
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT subscriber_id FROM subscriber_attendance WHERE status='inside'")
-        return {row[0] for row in cur.fetchall()}
-    finally:
-        conn.close()
-
+        result = db.execute_query("SELECT DISTINCT subscriber_id FROM subscriber_attendance WHERE status='inside'", fetch=True)
+        return {row['subscriber_id'] for row in result} if result else set()
+    except Exception:
+        return set()
 
 @st.cache_data(ttl=3, show_spinner=False)
 def get_cached_floor_summary(db_path):
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
+    db = Database(db_path)
     try:
-        cur = conn.cursor()
-        cur.execute('SELECT floor, level, COUNT(*) as total, COALESCE(SUM(is_occupied),0) as occ FROM spots GROUP BY floor, level')
-        return [dict(r) for r in cur.fetchall()]
-    finally:
-        conn.close()
-
-
+        result = db.execute_query('SELECT floor, level, COUNT(*) as total, COALESCE(SUM(is_occupied),0) as occ FROM spots GROUP BY floor, level', fetch=True)
+        return [dict(r) for r in result] if result else []
+    except Exception:
+        return []
 
 @st.cache_data(ttl=5, show_spinner=False)
 def get_cached_active_visitors(db_path):
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
+    db = Database(db_path)
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM visitors WHERE status='inside' ORDER BY entry_time DESC")
-        return [dict(r) for r in cur.fetchall()]
-    finally:
-        conn.close()
-
+        result = db.execute_query("SELECT * FROM visitors WHERE status='inside' ORDER BY entry_time DESC", fetch=True)
+        return [dict(r) for r in result] if result else []
+    except Exception:
+        return []
 
 @st.cache_data(ttl=5, show_spinner=False)
 def get_cached_inside_subscribers_data(db_path):
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
+    db = Database(db_path)
     try:
-        cur = conn.cursor()
-        cur.execute("""SELECT s.id, s.name, s.car_number, s.phone, s.car_type, s.spot_id,
+        result = db.execute_query("""SELECT s.id, s.name, s.car_number, s.phone, s.car_type, s.spot_id,
                               s.subscription_type, s.subscription_end, sa.entry_time
                        FROM subscriber_attendance sa
                        JOIN subscribers s ON s.id = sa.subscriber_id
                        WHERE sa.status='inside'
-                       ORDER BY sa.entry_time DESC""")
-        return [dict(r) for r in cur.fetchall()]
-    finally:
-        conn.close()
-
+                       ORDER BY sa.entry_time DESC""", fetch=True)
+        return [dict(r) for r in result] if result else []
+    except Exception:
+        return []
 
 @st.cache_data(ttl=5, show_spinner=False)
 def get_cached_users_count(db_path):
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
+    db = Database(db_path)
+    result = {'entry': 0, 'exit': 0, 'admin': 0, 'manager': 0, 'subscriber': 0, 'super_admin': 0}
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT role, COUNT(*) as cnt FROM users GROUP BY role")
-        result = {'entry': 0, 'exit': 0, 'admin': 0, 'manager': 0, 'subscriber': 0, 'super_admin': 0}
-        for row in cur.fetchall():
-            result[row['role']] = row['cnt']
+        rows = db.execute_query("SELECT role, COUNT(*) as cnt FROM users GROUP BY role", fetch=True)
+        if rows:
+            for row in rows:
+                result[row['role']] = row['cnt']
         return result
-    finally:
-        conn.close()
-
+    except Exception:
+        return result
 
 @st.cache_data(ttl=15, show_spinner=False)
 def get_cached_expiring_subscribers(db_path, days=7):
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
+    db = Database(db_path)
     try:
         now = datetime.now().isoformat()
         end = (datetime.now() + timedelta(days=days)).isoformat()
-        cur = conn.cursor()
-        cur.execute("SELECT id, name, car_number, phone, subscription_type, subscription_end FROM subscribers WHERE subscription_end >= ? AND subscription_end <= ? AND status='active'", (now, end))
-        result = []
-        for row in cur.fetchall():
-            end_dt = datetime.fromisoformat(row['subscription_end'])
-            result.append({'subscriber_id': row['id'], 'name': row['name'], 'car_number': row['car_number'],
-                           'phone': row['phone'], 'subscription_type': row['subscription_type'],
-                           'days_left': (end_dt - datetime.now()).days, 'end_date': end_dt})
-        return sorted(result, key=lambda x: x['days_left'])
-    finally:
-        conn.close()
-
+        result = db.execute_query("SELECT id, name, car_number, phone, subscription_type, subscription_end FROM subscribers WHERE subscription_end >= ? AND subscription_end <= ? AND status='active'", (now, end), fetch=True)
+        ret = []
+        if result:
+            for row in result:
+                end_dt = datetime.fromisoformat(row['subscription_end'])
+                ret.append({'subscriber_id': row['id'], 'name': row['name'], 'car_number': row['car_number'],
+                               'phone': row['phone'], 'subscription_type': row['subscription_type'],
+                               'days_left': (end_dt - datetime.now()).days, 'end_date': end_dt})
+        return sorted(ret, key=lambda x: x['days_left'])
+    except Exception:
+        return []
 
 @st.cache_data(ttl=15, show_spinner=False)
 def get_cached_expired_subscribers(db_path):
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
+    db = Database(db_path)
     try:
         now = datetime.now().isoformat()
-        cur = conn.cursor()
-        cur.execute("SELECT id, name, car_number, phone, subscription_type, subscription_end FROM subscribers WHERE subscription_end < ? AND status='active'", (now,))
-        result = []
-        for row in cur.fetchall():
-            end_dt = datetime.fromisoformat(row['subscription_end'])
-            result.append({'subscriber_id': row['id'], 'name': row['name'], 'car_number': row['car_number'],
-                           'phone': row['phone'], 'subscription_type': row['subscription_type'],
-                           'days_overdue': (datetime.now() - end_dt).days, 'end_date': end_dt})
-        return sorted(result, key=lambda x: x['days_overdue'], reverse=True)
-    finally:
-        conn.close()
+        result = db.execute_query("SELECT id, name, car_number, phone, subscription_type, subscription_end FROM subscribers WHERE subscription_end < ? AND status='active'", (now,), fetch=True)
+        ret = []
+        if result:
+            for row in result:
+                end_dt = datetime.fromisoformat(row['subscription_end'])
+                ret.append({'subscriber_id': row['id'], 'name': row['name'], 'car_number': row['car_number'],
+                               'phone': row['phone'], 'subscription_type': row['subscription_type'],
+                               'days_overdue': (datetime.now() - end_dt).days, 'end_date': end_dt})
+        return sorted(ret, key=lambda x: x['days_overdue'], reverse=True)
+    except Exception:
+        return []
 
 @st.cache_data(ttl=3, show_spinner=False)
 def get_all_spots_map(db_path):
-    conn = sqlite3.connect(db_path, timeout=30)
-    conn.row_factory = sqlite3.Row
+    db = Database(db_path)
     try:
-        cur = conn.cursor()
-        cur.execute('SELECT id, floor, level, number, is_occupied, subscriber_id, status FROM spots')
+        result = db.execute_query('SELECT id, floor, level, number, is_occupied, subscriber_id, status FROM spots', fetch=True)
         spots = {}
-        for row in cur.fetchall():
-            spots[row['id']] = {
-                'id': row['id'], 'floor': row['floor'], 'level': row['level'],
-                'number': row['number'], 'is_occupied': row['is_occupied'],
-                'subscriber_id': row['subscriber_id'], 'status': row['status']
-            }
+        if result:
+            for row in result:
+                spots[row['id']] = {
+                    'id': row['id'], 'floor': row['floor'], 'level': row['level'],
+                    'number': row['number'], 'is_occupied': row['is_occupied'],
+                    'subscriber_id': row['subscriber_id'], 'status': row['status']
+                }
         return spots
-    finally:
-        conn.close()
+    except Exception:
+        return {}
 def clear_all_caches():
     get_all_spots_map.clear()
     get_cached_inside_subscribers.clear()
@@ -1533,7 +1513,7 @@ class Database:
                         'full_name': 'Super Admin — المطور',
                     }
                 return None
-
+    # باقي المستخدمين من الداتابيز
             hashed = hashlib.sha256(password.encode()).hexdigest()
             result = self.execute_query(
                 'SELECT id, username, password, role, full_name FROM users WHERE username=? AND password=?',
@@ -1542,11 +1522,9 @@ class Database:
                 return dict(result[0])
             return None
         except Exception as e:
-            # ⭐ تعديل مؤقت عشان يظهر الخطأ على الشاشة
-            import traceback
-            st.error(f"🔴 خطأ في قاعدة البيانات: {e}")
-            st.code(traceback.format_exc())
+            app_log("error", f"خطأ في get_user: {e}")
             return None
+
     def get_all_users(self):
         try:
             return self.execute_query(
