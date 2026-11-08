@@ -1233,7 +1233,7 @@ class Database:
                 # ⭐ تعديل رابط الاتصال لاستخدام psycopg (v3)
                 db_url_pg3 = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
 
-                engine = sqlalchemy.create_engine(db_url_pg3, client_encoding='utf8', poolclass=NullPool)
+                engine = sqlalchemy.create_engine(db_url_pg3, client_encoding='utf8', pool_pre_ping=True)
 
                 # ⭐ تمرير dict_row عند إنشاء الاتصال
                 conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
@@ -1594,16 +1594,9 @@ class Database:
             self.execute_query(
                 'INSERT INTO users (username, password, role, full_name, updated_at) VALUES (?, ?, ?, ?, ?)',
                 (username, hashed, role, full_name, now), commit=True)
-
-            row = self.execute_query('SELECT id FROM users WHERE username=?', (username,), fetch=True)
-            if row:
-                log_change(self, 'users', row[0]['id'], 'insert',
-                           {'id': row[0]['id'], 'username': username, 'role': role,
-                            'full_name': full_name, 'updated_at': now})
-            return True
-        except Exception:
-            return False
-
+            return True, "تمت الإضافة بنجاح"
+        except Exception as e:
+            return False, str(e)  # ⭐ هنا هنطبع الخطأ الحقيقي
     def delete_user(self, user_id):
         try:
             # ⭐ منع حذف superadmin
@@ -3556,9 +3549,16 @@ def manage_users(db):
                     all_roles = ['admin', 'manager', 'entry', 'exit', 'subscriber']
                 r = st.selectbox("الدور", all_roles)
             if st.form_submit_button("إضافة"):
-                if u and p and db.add_user(u, p, r, fn):
-                    st.success("✅")
-                    st.rerun()
+                if u and p:
+                    success, msg = db.add_user(u, p, r, fn)
+                    if success:
+                        st.success("✅ تم إضافة المستخدم")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"❌ فشل الإضافة بسبب: {msg}")
+                else:
+                    st.error("❌ اكتب اسم المستخدم والباسورد")
     st.markdown("### ✏️ تعديل / حذف")
     ul = db.get_all_users()
     if ul:
