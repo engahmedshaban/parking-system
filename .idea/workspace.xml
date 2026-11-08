@@ -155,22 +155,6 @@
       <option name="presentableId" value="Default" />
       <updated>1791387525635</updated>
     </task>
-    <task id="LOCAL-00028" summary="commit">
-      <option name="closed" value="true" />
-      <created>1791474048134</created>
-      <option name="number" value="00028" />
-      <option name="presentableId" value="LOCAL-00028" />
-      <option name="project" value="LOCAL" />
-      <updated>1791474048134</updated>
-    </task>
-    <task id="LOCAL-00029" summary="commit">
-      <option name="closed" value="true" />
-      <created>1791475318841</created>
-      <option name="number" value="00029" />
-      <option name="presentableId" value="LOCAL-00029" />
-      <option name="project" value="LOCAL" />
-      <updated>1791475318841</updated>
-    </task>
     <task id="LOCAL-00030" summary="commit">
       <option name="closed" value="true" />
       <created>1791478399681</created>
@@ -547,7 +531,23 @@
       <option name="project" value="LOCAL" />
       <updated>1794176799713</updated>
     </task>
-    <option name="localTasksCounter" value="77" />
+    <task id="LOCAL-00077" summary="commit">
+      <option name="closed" value="true" />
+      <created>1794177067737</created>
+      <option name="number" value="00077" />
+      <option name="presentableId" value="LOCAL-00077" />
+      <option name="project" value="LOCAL" />
+      <updated>1794177067737</updated>
+    </task>
+    <task id="LOCAL-00078" summary="commit">
+      <option name="closed" value="true" />
+      <created>1794177079611</created>
+      <option name="number" value="00078" />
+      <option name="presentableId" value="LOCAL-00078" />
+      <option name="project" value="LOCAL" />
+      <updated>1794177079611</updated>
+    </task>
+    <option name="localTasksCounter" value="79" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
