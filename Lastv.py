@@ -1533,7 +1533,7 @@ class Database:
                         'full_name': 'Super Admin — المطور',
                     }
                 return None
-    # باقي المستخدمين من الداتابيز
+
             hashed = hashlib.sha256(password.encode()).hexdigest()
             result = self.execute_query(
                 'SELECT id, username, password, role, full_name FROM users WHERE username=? AND password=?',
@@ -1542,9 +1542,11 @@ class Database:
                 return dict(result[0])
             return None
         except Exception as e:
-            app_log("error", f"خطأ في get_user: {e}")
+            # ⭐ تعديل مؤقت عشان يظهر الخطأ على الشاشة
+            import traceback
+            st.error(f"🔴 خطأ في قاعدة البيانات: {e}")
+            st.code(traceback.format_exc())
             return None
-
     def get_all_users(self):
         try:
             return self.execute_query(
