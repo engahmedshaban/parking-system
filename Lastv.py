@@ -1198,13 +1198,24 @@ def _get_shared_pg_conn(db_url):
     from psycopg.rows import dict_row
     # بنفتح اتصال واحد بس ونسيبه مفتوح
     return psycopg.connect(db_url, row_factory=dict_row, autocommit=True, prepare_threshold=None, connect_timeout=10)
-
+@st.cache_resource(show_spinner=False)
+def _get_pg_pool(db_url):
+    from psycopg_pool import ConnectionPool
+    from psycopg.rows import dict_row
+    # فتح Pool للاتصالات عشان التطبيق يبقى سريع
+    return ConnectionPool(
+        conninfo=db_url,
+        kwargs={"row_factory": dict_row, "autocommit": True},
+        min_size=1,
+        max_size=5
+    )
 # ===================================================================
 # ⭐⭐⭐ قاعدة البيانات (Railway Volume Support) ⭐⭐⭐
 # ===================================================================
 class Database:
+    _init_cache = set() # ⭐ عشان نمنع تكرار إنشاء الجداول في كل ضغطة زرار
+
     def __init__(self, db_path='garage.db'):
-        # ⭐ لو المسار نسبي — اعمل join مع base
         if not os.path.isabs(db_path):
             base = _get_base_data_dir()
             db_path = os.path.join(base, db_path)
@@ -1214,10 +1225,10 @@ class Database:
         if d:
             os.makedirs(d, exist_ok=True)
 
-        # ⭐ اطبع المسار الفعلي عشان تشوفه في اللوج
-        print(f"✅ Database initialized at: {self.db_path}")
-
-        self.init_db()
+        # ⭐ التعديل الجوهري: إنشاء الجداول بيحصل مرة واحدة بس
+        if self.db_path not in Database._init_cache:
+            self.init_db()
+            Database._init_cache.add(self.db_path)
 
     @contextmanager
     def get_connection(self):
@@ -1229,15 +1240,10 @@ class Database:
 
         if db_url:
             self.is_pg = True
-            # بنجيب الاتصال المحفوظ من الكاش
-            conn = _get_shared_pg_conn(db_url)
-
-            # لو الاتصال قفل لأي سبب (مثلاً السيرفر قطعه)، نمسح الكاش ونفتح واحد جديد
-            if conn.closed:
-                _get_shared_pg_conn.clear()
-                conn = _get_shared_pg_conn(db_url)
-
-            yield conn
+            # ⭐ هنا بنستخدم الـ Pool
+            pool = _get_pg_pool(db_url)
+            with pool.connection() as conn:
+                yield conn
         else:
             # كود SQLite زي ما هو
             self.is_pg = False
@@ -1255,442 +1261,6 @@ class Database:
 
             conn.create_function("nrm", 1, _nrm)
             yield conn
-    def execute_query(self, query, params=None, commit=False, fetch=False):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            if getattr(self, 'is_pg', False):
-                query = query.replace('?', '%s')
-                query = query.replace('nrm(', 'LOWER(')
-
-            if params:
-                cursor.execute(query, params)
-            else:
-                cursor.execute(query)
-            if fetch:
-                return cursor.fetchall()
-            return None
-    def init_db(self):
-        try:
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-
-                # ⭐ بنكريت الجداول لو إحنا على SQLite فقط. (أما Supabase فإنت عملت الجداول خلاص)
-                if not getattr(self, 'is_pg', False):
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS users
-                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
-                                       password TEXT NOT NULL, role TEXT NOT NULL, full_name TEXT,
-                                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS subscribers
-                                      (id TEXT PRIMARY KEY, name TEXT NOT NULL, workplace TEXT,
-                                       car_number TEXT, car_type TEXT, car_color TEXT, phone TEXT,
-                                       subscription_type TEXT, subscription_start TEXT, subscription_end TEXT,
-                                       payment_amount REAL, payment_status TEXT, status TEXT,
-                                       spot_id TEXT, registration_date TEXT, assigned_date TEXT)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS spots
-                                      (id TEXT PRIMARY KEY, floor INTEGER, level INTEGER, number INTEGER,
-                                       is_occupied INTEGER DEFAULT 0, subscriber_id TEXT, status TEXT)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS visitors
-                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_number TEXT UNIQUE NOT NULL,
-                                       entry_time TEXT NOT NULL, exit_time TEXT, vehicle_number TEXT,
-                                       vehicle_type TEXT, status TEXT DEFAULT 'inside', amount REAL DEFAULT 0,
-                                       payment_status TEXT DEFAULT 'pending', duration_minutes INTEGER DEFAULT 0,
-                                       created_at TEXT DEFAULT CURRENT_TIMESTAMP, spot_id TEXT,
-                                       movement_number INTEGER, phone TEXT)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS parking_settings (key TEXT PRIMARY KEY, value TEXT)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS financial_records
-                                      (id TEXT PRIMARY KEY, subscriber_id TEXT, type TEXT, amount REAL,
-                                       status TEXT, description TEXT, date TEXT, shift_id INTEGER)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS history
-                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, subscriber_id TEXT,
-                                       spot_id TEXT, details TEXT, date TEXT, movement_number INTEGER)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS subscriber_attendance
-                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, subscriber_id TEXT NOT NULL,
-                                       entry_time TEXT, exit_time TEXT, status TEXT DEFAULT 'outside',
-                                       created_at TEXT DEFAULT CURRENT_TIMESTAMP, movement_number INTEGER)''')
-                    cursor.execute('''CREATE TABLE IF NOT EXISTS shifts
-                                      (id INTEGER PRIMARY KEY AUTOINCREMENT, opened_by TEXT, opened_at TEXT,
-                                       closed_by TEXT, closed_at TEXT, status TEXT DEFAULT 'open',
-                                       total_revenue REAL DEFAULT 0, total_entries INTEGER DEFAULT 0,
-                                       total_exits INTEGER DEFAULT 0, visitor_revenue REAL DEFAULT 0,
-                                       subscriber_revenue REAL DEFAULT 0, details TEXT)''')
-
-                defaults = {'first_hour_price': '20', 'second_hour_price': '10', 'free_minutes': '10',
-                            'printer_type': 'epson_tm', 'printer_port': 'USB001', 'paper_width': '80',
-                            'last_movement_number': '0', 'last_visitor_ticket_number': '0',
-                            'daily_max_charge': '250', 'auto_refresh_sec': '0',
-                            'hour_grace_minutes': '10', 'system_expiry_date': '',
-                            'garage_name': DEFAULT_GARAGE_NAME,
-                            'app_fee': '10',
-                            'app_trial_days': '3',
-                            'vodafone_cash_number': '',
-                            'trial_enabled': '1',
-                            'garage_free_forever': '0',
-                            'garage_free_until': ''}
-
-                for k, v in defaults.items():
-                    if getattr(self, 'is_pg', False):
-                        cursor.execute(
-                            'INSERT INTO parking_settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING',
-                            (k, v))
-                    else:
-                        cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)', (k, v))
-
-                # ⭐ تكريت اليوزرات الافتراضية
-                for uname, pw, role, name in [
-                    ('admin', 'admin123', 'admin', 'مدير النظام'),
-                    ('manager', 'manager123', 'manager', 'مدير الجراج'),
-                    ('entry', 'entry123', 'entry', 'موظف دخول'),
-                    ('exit', 'exit123', 'exit', 'موظف خروج'),
-                    ('subscriber', 'sub123', 'subscriber', 'موظف المشتركين')
-                ]:
-                    hashed = hashlib.sha256(pw.encode()).hexdigest()
-                    if getattr(self, 'is_pg', False):
-                        cursor.execute(
-                            'INSERT INTO users (username, password, role, full_name) VALUES (%s, %s, %s, %s) ON CONFLICT (username) DO NOTHING',
-                            (uname, hashed, role, name))
-                    else:
-                        cursor.execute(
-                            'INSERT OR IGNORE INTO users (username, password, role, full_name) VALUES (?, ?, ?, ?)',
-                            (uname, hashed, role, name))
-
-                # ⭐ إضافة الهيكل
-                if getattr(self, 'is_pg', False):
-                    cursor.execute("SELECT value FROM parking_settings WHERE key='garage_structure'")
-                    if not cursor.fetchone():
-                        structure_serializable = {str(f): {str(l): v for l, v in levels.items()} for f, levels in
-                                                  DEFAULT_STRUCTURE.items()}
-                        cursor.execute("INSERT INTO parking_settings (key, value) VALUES (%s, %s)",
-                                       ('garage_structure', json.dumps(structure_serializable, ensure_ascii=False)))
-                    cursor.execute("SELECT value FROM parking_settings WHERE key='garage_floor_names'")
-                    if not cursor.fetchone():
-                        fn_serializable = {str(f): name for f, name in DEFAULT_FLOOR_NAMES.items()}
-                        cursor.execute("INSERT INTO parking_settings (key, value) VALUES (%s, %s)",
-                                       ('garage_floor_names', json.dumps(fn_serializable, ensure_ascii=False)))
-                else:
-                    existing = self.execute_query("SELECT value FROM parking_settings WHERE key='garage_structure'",
-                                                  fetch=True)
-                    if not existing:
-                        structure_serializable = {str(f): {str(l): v for l, v in levels.items()} for f, levels in
-                                                  DEFAULT_STRUCTURE.items()}
-                        cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)',
-                                       ('garage_structure', json.dumps(structure_serializable, ensure_ascii=False)))
-                    existing_fn = self.execute_query(
-                        "SELECT value FROM parking_settings WHERE key='garage_floor_names'", fetch=True)
-                    if not existing_fn:
-                        fn_serializable = {str(f): name for f, name in DEFAULT_FLOOR_NAMES.items()}
-                        cursor.execute('INSERT OR IGNORE INTO parking_settings (key, value) VALUES (?, ?)',
-                                       ('garage_floor_names', json.dumps(fn_serializable, ensure_ascii=False)))
-        except Exception as e:
-            app_log("error", f"فشل تهيئة قاعدة البيانات: {e}")
-    # ============ إعدادات الجراج ============
-    def get_garage_name(self):
-        try:
-            result = self.execute_query("SELECT value FROM parking_settings WHERE key='garage_name'", fetch=True)
-            if result and result[0]['value']:
-                return result[0]['value']
-        except Exception:
-            pass
-        return DEFAULT_GARAGE_NAME
-
-    def set_garage_name(self, name):
-        try:
-            now = datetime.now().isoformat()
-            val = name or DEFAULT_GARAGE_NAME
-            if getattr(self, 'is_pg', False):
-                self.execute_query("INSERT INTO parking_settings (key, value, updated_at) VALUES (%s, %s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at", (val, now), commit=True)
-            else:
-                self.execute_query("INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES (?, ?, ?)", (val, now), commit=True)
-            log_change(self, 'parking_settings', 'garage_name', 'update', {'key': 'garage_name', 'value': val, 'updated_at': now})
-            return True
-        except Exception:
-            return False
-
-    def set_garage_structure(self, structure):
-        try:
-            serializable = {str(f): {str(l): v for l, v in levels.items()} for f, levels in structure.items()}
-            now = datetime.now().isoformat()
-            val = json.dumps(serializable, ensure_ascii=False)
-            if getattr(self, 'is_pg', False):
-                self.execute_query("INSERT INTO parking_settings (key, value, updated_at) VALUES (%s, %s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at", (val, now), commit=True)
-            else:
-                self.execute_query("INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES (?, ?, ?)", (val, now), commit=True)
-            log_change(self, 'parking_settings', 'garage_structure', 'update', {'key': 'garage_structure', 'value': val, 'updated_at': now})
-            return True
-        except Exception as e:
-            app_log("error", f"set_garage_structure: {e}")
-            return False
-
-    def set_floor_names(self, names):
-        try:
-            serializable = {str(k): v for k, v in names.items()}
-            now = datetime.now().isoformat()
-            val = json.dumps(serializable, ensure_ascii=False)
-            if getattr(self, 'is_pg', False):
-                self.execute_query("INSERT INTO parking_settings (key, value, updated_at) VALUES (%s, %s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at", (val, now), commit=True)
-            else:
-                self.execute_query("INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES (?, ?, ?)", (val, now), commit=True)
-            log_change(self, 'parking_settings', 'garage_floor_names', 'update', {'key': 'garage_floor_names', 'value': val, 'updated_at': now})
-            return True
-        except Exception:
-            return False
-    def get_garage_structure(self):
-        try:
-            result = self.execute_query("SELECT value FROM parking_settings WHERE key='garage_structure'", fetch=True)
-            if result and result[0]['value']:
-                raw = json.loads(result[0]['value'])
-                structure = {}
-                for f_str, levels in raw.items():
-                    f = int(f_str)
-                    structure[f] = {}
-                    for l_str, data in levels.items():
-                        l = int(l_str)
-                        structure[f][l] = {
-                            'spots': int(data.get('spots', 0)),
-                            'name': data.get('name', f'مستوى {l}'),
-                            'start': int(data.get('start', 1))
-                        }
-                return structure
-        except Exception as e:
-            app_log("error", f"فشل تحميل هيكل الجراج: {e}")
-        return None
-
-    def set_garage_structure(self, structure):
-        try:
-            serializable = {str(f): {str(l): v for l, v in levels.items()}
-                            for f, levels in structure.items()}
-            now = datetime.now().isoformat()
-            val = json.dumps(serializable, ensure_ascii=False)
-            self.execute_query(
-                "INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES ('garage_structure', ?, ?)",
-                (val, now), commit=True)
-            log_change(self, 'parking_settings', 'garage_structure', 'update',
-                       {'key': 'garage_structure', 'value': val, 'updated_at': now})
-            return True
-        except Exception as e:
-            app_log("error", f"set_garage_structure: {e}")
-            return False
-
-    def get_floor_names(self):
-        try:
-            result = self.execute_query("SELECT value FROM parking_settings WHERE key='garage_floor_names'", fetch=True)
-            if result and result[0]['value']:
-                raw = json.loads(result[0]['value'])
-                return {int(k): v for k, v in raw.items()}
-        except Exception:
-            pass
-        return dict(DEFAULT_FLOOR_NAMES)
-
-    def set_floor_names(self, names):
-        try:
-            serializable = {str(k): v for k, v in names.items()}
-            now = datetime.now().isoformat()
-            val = json.dumps(serializable, ensure_ascii=False)
-            self.execute_query(
-                "INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES ('garage_floor_names', ?, ?)",
-                (val, now), commit=True)
-            log_change(self, 'parking_settings', 'garage_floor_names', 'update',
-                       {'key': 'garage_floor_names', 'value': val, 'updated_at': now})
-            return True
-        except Exception:
-            return False
-    # ============ المستخدمين ============
-    def get_user(self, username, password):
-        try:
-            # ⭐⭐⭐ SuperAdmin hardcoded — مش في الداتابيز
-            if username.lower() == SUPERADMIN_USERNAME.lower():
-                if hashlib.sha256(password.encode()).hexdigest() == SUPERADMIN_PASSWORD_HASH:
-                    return {
-                        'id': -1,
-                        'username': SUPERADMIN_USERNAME,
-                        'role': 'super_admin',
-                        'full_name': 'Super Admin — المطور',
-                    }
-                return None
-    # باقي المستخدمين من الداتابيز
-            hashed = hashlib.sha256(password.encode()).hexdigest()
-            result = self.execute_query(
-                'SELECT id, username, password, role, full_name FROM users WHERE username=? AND password=?',
-                (username, hashed), fetch=True)
-            if result and len(result) > 0:
-                return dict(result[0])
-            return None
-        except Exception as e:
-            app_log("error", f"خطأ في get_user: {e}")
-            return None
-
-    def get_all_users(self):
-        try:
-            return self.execute_query(
-                """SELECT id, username, role, full_name, created_at 
-                   FROM users 
-                   WHERE LOWER(username) != LOWER(?)""",
-                (SUPERADMIN_USERNAME,), fetch=True) or []
-        except Exception:
-            return []
-
-    def update_user(self, user_id, **kwargs):
-        try:
-            # ⭐ منع تعديل superadmin
-            if user_id == -1 or user_id == 0:
-                return False
-
-            if kwargs.get('role') == 'super_admin':
-                return False
-
-            # امنع تعديل super_admin موجود
-            existing = self.execute_query('SELECT role FROM users WHERE id=?', (user_id,), fetch=True)
-            if existing and existing[0]['role'] == 'super_admin':
-                return False
-
-            updates, params = [], []
-            if kwargs.get('username'):
-                updates.append("username=?")
-                params.append(kwargs['username'])
-            if kwargs.get('full_name') is not None:
-                updates.append("full_name=?")
-                params.append(kwargs['full_name'])
-            if kwargs.get('password'):
-                updates.append("password=?")
-                params.append(hashlib.sha256(kwargs['password'].encode()).hexdigest())
-            if kwargs.get('role'):
-                updates.append("role=?")
-                params.append(kwargs['role'])
-            if not updates:
-                return False
-
-            now = datetime.now().isoformat()
-            updates.append("updated_at=?")
-            params.append(now)
-            params.append(user_id)
-
-            self.execute_query(f"UPDATE users SET {', '.join(updates)} WHERE id=?", params, commit=True)
-
-            log_change(self, 'users', user_id, 'update', {
-                'id': user_id, 'updated_at': now,
-                **{k: v for k, v in kwargs.items() if k != 'password'}
-            })
-            return True
-        except Exception as e:
-            app_log("error", f"update_user: {e}")
-            return False
-
-    def add_user(self, username, password, role, full_name):
-        try:
-            hashed = hashlib.sha256(password.encode()).hexdigest()
-            now = datetime.now().isoformat()
-            self.execute_query(
-                'INSERT INTO users (username, password, role, full_name, updated_at) VALUES (?, ?, ?, ?, ?)',
-                (username, hashed, role, full_name, now), commit=True)
-            return True, "تمت الإضافة بنجاح"
-        except Exception as e:
-            return False, str(e)  # ⭐ هنا هنطبع الخطأ الحقيقي
-    def delete_user(self, user_id):
-        try:
-            # ⭐ منع حذف superadmin
-            if user_id == -1 or user_id == 0:
-                return False
-            self.execute_query('DELETE FROM users WHERE id=?', (user_id,), commit=True)
-            log_change(self, 'users', user_id, 'delete', None)
-            return True
-        except Exception:
-            return False
-    def reset_all_passwords(self):
-        try:
-            users = [
-                # ⭐ شيلنا superadmin — مش في الداتابيز
-                ('admin', 'admin123', 'admin', 'مدير النظام'),
-                ('manager', 'manager123', 'manager', 'مدير الجراج'),
-                ('entry', 'entry123', 'entry', 'موظف دخول'),
-                ('exit', 'exit123', 'exit', 'موظف خروج'),
-                ('subscriber', 'sub123', 'subscriber', 'موظف المشتركين'),
-            ]
-            results = []
-            now = datetime.now().isoformat()
-            for uname, pw, role, name in users:
-                hashed = hashlib.sha256(pw.encode()).hexdigest()
-                existing = self.execute_query('SELECT id FROM users WHERE username=?', (uname,), fetch=True)
-                if existing:
-                    self.execute_query(
-                        'UPDATE users SET password=?, role=?, full_name=?, updated_at=? WHERE username=?',
-                        (hashed, role, name, now, uname), commit=True)
-                    log_change(self, 'users', existing[0]['id'], 'update',
-                               {'id': existing[0]['id'], 'password_changed': True, 'updated_at': now})
-                    results.append(f"✅ تم تحديث: {uname} | كلمة المرور: {pw}")
-                else:
-                    self.execute_query(
-                        'INSERT INTO users (username, password, role, full_name, updated_at) VALUES (?, ?, ?, ?, ?)',
-                        (uname, hashed, role, name, now), commit=True)
-                    results.append(f"➕ تم إضافة: {uname} | كلمة المرور: {pw}")
-            return results
-        except Exception as e:
-            return [f"❌ خطأ: {e}"]
-
-    def open_shift(self, username):
-        try:
-            if self.get_current_shift():
-                return False
-            self.execute_query('INSERT INTO shifts (opened_by, opened_at, status) VALUES (?, ?, ?)',
-                               (username, datetime.now().isoformat(), 'open'), commit=True)
-            return True
-        except Exception:
-            return False
-
-    def close_shift(self, username, total_revenue, total_entries, total_exits, visitor_revenue, subscriber_revenue, details):
-        try:
-            result = self.execute_query("SELECT id FROM shifts WHERE status='open' ORDER BY id DESC LIMIT 1", fetch=True)
-            if not result:
-                return False
-            shift_id = result[0]['id']
-            self.execute_query(
-                "UPDATE shifts SET closed_by=?, closed_at=?, status='closed', total_revenue=?, total_entries=?, total_exits=?, visitor_revenue=?, subscriber_revenue=?, details=? WHERE id=?",
-                (username, datetime.now().isoformat(), total_revenue, total_entries, total_exits,
-                 visitor_revenue, subscriber_revenue, details, shift_id), commit=True)
-            return True
-        except Exception:
-            return False
-
-    def get_current_shift(self):
-        try:
-            result = self.execute_query("SELECT * FROM shifts WHERE status='open' ORDER BY id DESC LIMIT 1", fetch=True)
-            return dict(result[0]) if result else None
-        except Exception:
-            return None
-
-    def get_shift_history(self):
-        try:
-            result = self.execute_query('SELECT * FROM shifts ORDER BY id DESC', fetch=True)
-            return [dict(r) for r in result] if result else []
-        except Exception:
-            return []
-
-    def clear_data_range(self, date_from, date_to, clear_visitors=True, clear_financial=True,
-                         clear_history=True, clear_shifts=False, clear_attendance=True):
-        try:
-            results = {'visitors': 0, 'financial': 0, 'history': 0, 'shifts': 0, 'attendance': 0}
-            with self.get_connection() as conn:
-                cursor = conn.cursor()
-                if clear_visitors:
-                    cursor.execute('DELETE FROM visitors WHERE date(entry_time) >= ? AND date(entry_time) <= ?', (date_from, date_to))
-                    results['visitors'] = cursor.rowcount
-                if clear_financial:
-                    cursor.execute('DELETE FROM financial_records WHERE date(date) >= ? AND date(date) <= ?', (date_from, date_to))
-                    results['financial'] = cursor.rowcount
-                if clear_history:
-                    cursor.execute('DELETE FROM history WHERE date(date) >= ? AND date(date) <= ?', (date_from, date_to))
-                    results['history'] = cursor.rowcount
-                if clear_shifts:
-                    cursor.execute("DELETE FROM shifts WHERE date(opened_at) >= ? AND date(opened_at) <= ? AND status='closed'", (date_from, date_to))
-                    results['shifts'] = cursor.rowcount
-                if clear_attendance:
-                    cursor.execute('DELETE FROM subscriber_attendance WHERE date(entry_time) >= ? AND date(entry_time) <= ?', (date_from, date_to))
-                    results['attendance'] = cursor.rowcount
-            clear_all_caches()
-            return results
-        except Exception as e:
-            app_log("error", f"خطأ في مسح البيانات: {e}")
-            return None
-
-
 def get_parking_settings(db):
     settings = {}
     result = db.execute_query('SELECT key, value FROM parking_settings', fetch=True)
