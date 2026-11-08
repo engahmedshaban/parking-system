@@ -1270,10 +1270,9 @@ class Database:
     def execute_query(self, query, params=None, commit=False, fetch=False):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            # ⭐ التعديل ده بيحول علامة ? لـ %s عشان تشتغل على Supabase
+            # ⭐ تحويل علامة ? و nrm عشان يشتغلوا على PostgreSQL
             if getattr(self, 'is_pg', False):
                 query = query.replace('?', '%s')
-                # ⭐ استبدال دالة nrm بدالة LOWER لأن nrm مش موجودة في PostgreSQL
                 query = query.replace('nrm(', 'LOWER(')
 
             if params:
