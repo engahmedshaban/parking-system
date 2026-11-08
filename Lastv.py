@@ -1192,13 +1192,13 @@ class GarageRegistry:
             return True
         except Exception:
             return False
-
 @st.cache_resource(show_spinner=False)
-def _get_pg_pool(db_url):
-    from psycopg_pool import ConnectionPool
+def _get_shared_pg_conn(db_url):
+    import psycopg
     from psycopg.rows import dict_row
-    # ⭐ بنفتح الاتصال مرة واحدة بس ونسيبه مفتوح (max_size=10)
-    return ConnectionPool(conninfo=db_url, kwargs={"row_factory": dict_row, "autocommit": True}, max_size=10)
+    # بنفتح اتصال واحد بس ونسيبه مفتوح
+    return psycopg.connect(db_url, row_factory=dict_row, autocommit=True, prepare_threshold=None, connect_timeout=10)
+
 # ===================================================================
 # ⭐⭐⭐ قاعدة البيانات (Railway Volume Support) ⭐⭐⭐
 # ===================================================================
@@ -1221,44 +1221,40 @@ class Database:
 
     @contextmanager
     def get_connection(self):
-        conn = None
-        try:
-            db_url = None
-            if hasattr(st, "secrets") and "SUPABASE_DB_URL" in st.secrets:
-                db_url = st.secrets["SUPABASE_DB_URL"]
-            elif os.environ.get("SUPABASE_DB_URL"):
-                db_url = os.environ.get("SUPABASE_DB_URL")
+        db_url = None
+        if hasattr(st, "secrets") and "SUPABASE_DB_URL" in st.secrets:
+            db_url = st.secrets["SUPABASE_DB_URL"]
+        elif os.environ.get("SUPABASE_DB_URL"):
+            db_url = os.environ.get("SUPABASE_DB_URL")
 
-            if db_url:
-                self.is_pg = True
-                # ⭐ هنا بنجيب الاتصال من الـ Pool اللي فوق (مش بنفتح واحد جديد)
-                pool = _get_pg_pool(db_url)
-                with pool.connection() as conn:
-                    yield conn
-            else:
-                self.is_pg = False
-                import sqlite3
-                conn = sqlite3.connect(self.db_path, timeout=30,
-                                       check_same_thread=False, isolation_level=None)
-                conn.row_factory = sqlite3.Row
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA synchronous=FULL")
+        if db_url:
+            self.is_pg = True
+            # بنجيب الاتصال المحفوظ من الكاش
+            conn = _get_shared_pg_conn(db_url)
 
-                import re as _re
-                def _nrm(s):
-                    if s is None: return ''
-                    s = str(s).lower()
-                    s = _re.sub(r'[\s\u00a0\u200b\u2028\u2029\u200f\u200e\t]+', ' ', s)
-                    return s.strip()
+            # لو الاتصال قفل لأي سبب (مثلاً السيرفر قطعه)، نمسح الكاش ونفتح واحد جديد
+            if conn.closed:
+                _get_shared_pg_conn.clear()
+                conn = _get_shared_pg_conn(db_url)
 
-                conn.create_function("nrm", 1, _nrm)
-                yield conn
-        finally:
-            if conn is not None and not self.is_pg:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+            yield conn
+        else:
+            # كود SQLite زي ما هو
+            self.is_pg = False
+            import sqlite3
+            conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False, isolation_level=None)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=FULL")
+            import re as _re
+            def _nrm(s):
+                if s is None: return ''
+                s = str(s).lower()
+                s = _re.sub(r'[\s\u00a0\u200b\u2028\u2029\u200f\u200e\t]+', ' ', s)
+                return s.strip()
+
+            conn.create_function("nrm", 1, _nrm)
+            yield conn
     def execute_query(self, query, params=None, commit=False, fetch=False):
         with self.get_connection() as conn:
             cursor = conn.cursor()
