@@ -303,13 +303,19 @@ def get_spot_location(spot_id):
 def get_next_movement_number(db):
     try:
         result = db.execute_query("SELECT value FROM parking_settings WHERE key='last_movement_number'", fetch=True)
-        new = int(result[0]['value']) + 1 if result else 1
-        db.execute_query("UPDATE parking_settings SET value=? WHERE key='last_movement_number'", (str(new),), commit=True)
-        return new
-    except Exception:
-        db.execute_query("INSERT OR IGNORE INTO parking_settings (key, value) VALUES ('last_movement_number', '1')", commit=True)
+        if result:
+            new = int(result[0]['value']) + 1
+            db.execute_query("UPDATE parking_settings SET value=? WHERE key='last_movement_number'", (str(new),), commit=True)
+            return new
+        else:
+            if getattr(db, 'is_pg', False):
+                db.execute_query("INSERT INTO parking_settings (key, value) VALUES ('last_movement_number', '1') ON CONFLICT (key) DO NOTHING", commit=True)
+            else:
+                db.execute_query("INSERT OR IGNORE INTO parking_settings (key, value) VALUES ('last_movement_number', '1')", commit=True)
+            return 1
+    except Exception as e:
+        app_log("error", f"get_next_movement_number: {e}")
         return 1
-
 
 def generate_qr_base64(data, color="#000000", box_size=6):
     try:
@@ -1280,6 +1286,8 @@ class Database:
             # ⭐ التعديل ده بيحول علامة ? لـ %s عشان تشتغل على Supabase
             if getattr(self, 'is_pg', False):
                 query = query.replace('?', '%s')
+                # ⭐ استبدال دالة nrm بدالة LOWER لأن nrm مش موجودة في PostgreSQL
+                query = query.replace('nrm(', 'LOWER(')
 
             if params:
                 cursor.execute(query, params)
@@ -1288,17 +1296,6 @@ class Database:
             if fetch:
                 return cursor.fetchall()
             return None
-    def execute_query(self, query, params=None, commit=False, fetch=False):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            if params:
-                cursor.execute(query, params)
-            else:
-                cursor.execute(query)
-            if fetch:
-                return cursor.fetchall()
-            return None
-
     def init_db(self):
         try:
             with self.get_connection() as conn:
@@ -1783,20 +1780,23 @@ class VisitorManager:
             try:
                 with self.db.get_connection() as conn:
                     cursor = conn.cursor()
-                    cursor.execute("BEGIN IMMEDIATE")
+                    if not getattr(self.db, 'is_pg', False):
+                        cursor.execute("BEGIN IMMEDIATE")
                     cursor.execute("SELECT value FROM parking_settings WHERE key='last_visitor_ticket_number'")
                     row = cursor.fetchone()
                     new = int(row[0]) + 1 if row else 1
-                    cursor.execute("UPDATE parking_settings SET value=? WHERE key='last_visitor_ticket_number'", (str(new),))
+                    if getattr(self.db, 'is_pg', False):
+                        cursor.execute("UPDATE parking_settings SET value=%s WHERE key='last_visitor_ticket_number'", (str(new),))
+                    else:
+                        cursor.execute("UPDATE parking_settings SET value=? WHERE key='last_visitor_ticket_number'", (str(new),))
                     conn.commit()
                     return f"VIS-{new:06d}"
-            except sqlite3.OperationalError as e:
+            except Exception as e:
                 if "database is locked" in str(e) and attempt < 4:
                     time.sleep(0.2)
                     continue
                 raise
         return None
-
     def entry_visitor(self, vehicle_number, vehicle_type='سيارة', spot_id=None, phone=None, card_number=None):
         try:
             for attempt in range(3):
@@ -2080,11 +2080,14 @@ class GarageManager:
                         data = self.structure[floor][level]
                         for i in range(data['spots']):
                             num = data['start'] + i
-                            cursor.execute('INSERT OR IGNORE INTO spots (id, floor, level, number, status) VALUES (?, ?, ?, ?, ?)',
-                                           (f"{floor}_{level}_{num}", floor, level, num, 'available'))
+                            if getattr(self.db, 'is_pg', False):
+                                cursor.execute('INSERT INTO spots (id, floor, level, number, status) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING',
+                                               (f"{floor}_{level}_{num}", floor, level, num, 'available'))
+                            else:
+                                cursor.execute('INSERT OR IGNORE INTO spots (id, floor, level, number, status) VALUES (?, ?, ?, ?, ?)',
+                                               (f"{floor}_{level}_{num}", floor, level, num, 'available'))
         except Exception as e:
             app_log("error", f"خطأ في init_spots: {e}")
-
     def save_and_apply_structure(self, new_structure, new_floor_names):
         counter = 1
         for floor in sorted(new_structure.keys()):
@@ -3202,9 +3205,14 @@ def _render_app_fee_config(db):
             }
             now = datetime.now().isoformat()
             for k, v in updates.items():
-                db.execute_query(
-                    "INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES (?, ?, ?)",
-                    (k, v, now), commit=True)
+                if getattr(db, 'is_pg', False):
+                    db.execute_query(
+                        "INSERT INTO parking_settings (key, value, updated_at) VALUES (%s, %s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at",
+                        (k, v, now), commit=True)
+                else:
+                    db.execute_query(
+                        "INSERT OR REPLACE INTO parking_settings (key, value, updated_at) VALUES (?, ?, ?)",
+                        (k, v, now), commit=True)
                 log_change(db, 'parking_settings', k, 'update',
                            {'key': k, 'value': v, 'updated_at': now})
             st.success("✅ تم الحفظ")
