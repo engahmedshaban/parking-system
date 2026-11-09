@@ -1,19 +1,20 @@
-FROM python:3.10-slim-bullseye
+# 1. استخدام صورة أحدث من Debian (Bookworm)
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# تثبيت أدوات البناء الأساسية لتجنب مشاكل المكتبات
+# 2. تثبيت أدوات البناء الأساسية
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# نسخ ملف المتطلبات وتثبيتها
+# 3. نسخ ملف المتطلبات وتثبيتها
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# نسخ باقي ملفات المشروع
+# 4. نسخ باقي ملفات المشروع
 COPY . .
 
-# أمر تشغيل التطبيق
+# 5. أمر تشغيل التطبيق
 CMD ["python", "run_app.py"]
