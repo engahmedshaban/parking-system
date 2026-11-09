@@ -1,0 +1,3 @@
+[[build.env]]
+  name = "PIP_ONLY_BINARY"
+  value = ":all:"
